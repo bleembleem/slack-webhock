@@ -10,6 +10,7 @@
  * /chat already emits SSE text_delta; we adapt that iterable into post().
  */
 
+import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Chat, type Message, type Thread } from 'chat';
 import { createSlackAdapter } from '@chat-adapter/slack';
@@ -76,19 +77,17 @@ async function* withFallback(source: AsyncIterable<string>): AsyncIterable<strin
   if (!any) yield '(empty response)';
 }
 
-const MAKERS_CONVERSATION_ID_RE = /^[0-9A-Za-z._-]{6,36}$/;
-
 /**
- * Agent 路由用 makers-conversation-id 做粘性会话。
- * 只允许 6–36 位 [0-9A-Za-z._-]；Slack thread.id 含冒号，原样传入会 404
- * `domain endpoints match fail`。
+ * Agent sticky routing expects the same conversation-id shape the web UI uses:
+ * a 36-char UUID v4 (version nibble `4`, RFC variant `8`/`9`/`a`/`b`).
+ * Slack thread ids contain `:` and are not valid Makers conversation ids.
  */
-function toMakersConversationId(threadId: string): string {
-  const normalized = threadId.replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
-  if (MAKERS_CONVERSATION_ID_RE.test(normalized)) return normalized;
-  const clipped = (normalized || 'slack').slice(0, 36);
-  if (clipped.length >= 6) return clipped;
-  return (clipped + 'xxxxxx').slice(0, 6);
+function uuidFromSeed(seed: string): string {
+  const chars = createHash('sha256').update(seed).digest('hex').slice(0, 32).split('');
+  chars[12] = '4';
+  chars[16] = ((Number.parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
+  const hex = chars.join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 async function streamAgent(opts: {
@@ -98,25 +97,31 @@ async function streamAgent(opts: {
   conversationId: string;
   signal?: AbortSignal;
 }): Promise<AsyncIterable<string>> {
-  const conversationId = toMakersConversationId(opts.conversationId);
+  const conversationId = uuidFromSeed(`slack-thread:${opts.conversationId}`);
+  const userId = uuidFromSeed(`slack-user:${opts.userId}`);
   const url = `${opts.origin}/chat`;
   logger.log(`POST ${url} makers-conversation-id=${conversationId}`);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
+      Accept: '*/*',
       'Content-Type': 'application/json',
+      Origin: opts.origin,
+      Referer: `${opts.origin}/`,
+      'User-Agent':
+        'Mozilla/5.0 (compatible; SlackWebhookAgent/1.0; +https://slack-webhock.edgeone.dev/)',
       'makers-conversation-id': conversationId,
     },
     body: JSON.stringify({
       message: opts.message,
-      userId: opts.userId,
+      userId,
     }),
     signal: opts.signal,
   });
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+    throw new Error(`chat HTTP ${res.status}: ${detail.slice(0, 200)}`);
   }
 
   return withFallback(sseTextDeltas(res));
