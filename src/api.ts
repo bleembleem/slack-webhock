@@ -8,7 +8,8 @@
  *   cloud-functions/conversations/index.ts       → POST /conversations         List conversations for a user
  *   cloud-functions/clear-history/index.ts       → POST /clear-history         Clear messages of one conversation
  *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
- *   cloud-functions/slack-webhook/index.ts       → POST /slack-webhook         Slack Events API via Chat SDK Slack adapter
+ *   edge-functions/slack-webhook/index.ts        → POST /slack-webhook         Slack Events API ack (HMAC + 200)
+ *   cloud-functions/slack-process/index.ts       → POST /slack-process         Chat SDK worker (do not point Slack here)
  *
  * This file defines all API paths and request wrappers.
  */
