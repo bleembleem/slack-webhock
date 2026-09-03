@@ -3,6 +3,11 @@
  *
  * Slack adapter verifies signatures and parses Events API payloads.
  * Memory state adapter keeps subscriptions/locks in-process (lost on restart).
+ *
+ * Chat SDK does not return HTTP SSE from the webhook. It accepts
+ * AsyncIterable<string> on thread.post() and streams into Slack via
+ * chat.startStream / appendStream (or post+edit fallback).
+ * /chat already emits SSE text_delta; we adapt that iterable into post().
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -30,13 +35,12 @@ let bot: SlackBot | undefined;
 let cachedToken = '';
 let cachedSigningSecret = '';
 
-async function collectSseText(res: Response): Promise<string> {
+async function* sseTextDeltas(res: Response): AsyncIterable<string> {
   const reader = res.body?.getReader();
-  if (!reader) return '';
+  if (!reader) return;
 
   const decoder = new TextDecoder();
   let buffer = '';
-  let text = '';
 
   while (true) {
     const { done, value } = await reader.read();
@@ -55,22 +59,30 @@ async function collectSseText(res: Response): Promise<string> {
       if (eventType !== 'text_delta' || !data) continue;
       try {
         const parsed = JSON.parse(data) as { delta?: unknown };
-        if (typeof parsed.delta === 'string') text += parsed.delta;
+        if (typeof parsed.delta === 'string' && parsed.delta) yield parsed.delta;
       } catch {
         /* ignore malformed frames */
       }
     }
   }
-
-  return text.trim();
 }
 
-async function runAgent(opts: {
+async function* withFallback(source: AsyncIterable<string>): AsyncIterable<string> {
+  let any = false;
+  for await (const chunk of source) {
+    any = true;
+    yield chunk;
+  }
+  if (!any) yield '(empty response)';
+}
+
+async function streamAgent(opts: {
   origin: string;
   message: string;
   userId: string;
   conversationId: string;
-}): Promise<string> {
+  signal?: AbortSignal;
+}): Promise<AsyncIterable<string>> {
   const res = await fetch(`${opts.origin}/chat`, {
     method: 'POST',
     headers: {
@@ -81,6 +93,7 @@ async function runAgent(opts: {
       message: opts.message,
       userId: opts.userId,
     }),
+    signal: opts.signal,
   });
 
   if (!res.ok) {
@@ -88,23 +101,18 @@ async function runAgent(opts: {
     throw new Error(`chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
   }
 
-  return collectSseText(res);
+  return withFallback(sseTextDeltas(res));
 }
 
-async function replyToThread(thread: Thread, message: Message): Promise<void> {
+async function replyToThread(thread: Thread, message: Message, source: string): Promise<void> {
   if (message.author.isMe || message.author.isBot === true) {
     logger.log(
-      `skip thread=${thread.id} isMe=${message.author.isMe} isBot=${message.author.isBot}`,
+      `skip ${source} thread=${thread.id} isMe=${message.author.isMe} isBot=${message.author.isBot}`,
     );
     return;
   }
 
-  const text = message.text.trim();
-  if (!text) {
-    logger.log(`skip empty text thread=${thread.id} user=${message.author.userId}`);
-    return;
-  }
-
+  const text = message.text.trim() || '(The user sent a message with no text.)';
   const origin = slackRequestContext.getStore()?.origin;
   if (!origin) {
     logger.error('missing request origin; cannot call /chat');
@@ -113,17 +121,25 @@ async function replyToThread(thread: Thread, message: Message): Promise<void> {
   }
 
   logger.log(
-    `thread=${thread.id} user=${message.author.userId} text="${text.slice(0, 50)}"`,
+    `${source} thread=${thread.id} user=${message.author.userId} text="${text.slice(0, 50)}"`,
   );
 
   try {
-    const reply = await runAgent({
+    await thread.startTyping?.('Thinking…');
+  } catch (e) {
+    logger.log('startTyping failed:', e);
+  }
+
+  try {
+    const stream = await streamAgent({
       origin,
       message: text,
       userId: `slack:${message.author.userId}`,
       conversationId: thread.id,
+      signal: thread.signal,
     });
-    await thread.post(reply || '(empty response)');
+    await thread.post(stream);
+    logger.log(`${source} posted stream to Slack thread=${thread.id}`);
   } catch (e) {
     logger.error('failed to handle Slack thread:', e);
     try {
@@ -149,6 +165,7 @@ function createBot(env: SlackEnv): SlackBot {
       slack: createSlackAdapter({
         botToken: env.SLACK_BOT_TOKEN,
         signingSecret: env.SLACK_SIGNING_SECRET,
+        nativeStreaming: true,
       }),
     },
     state: createMemoryState(),
@@ -156,20 +173,22 @@ function createBot(env: SlackEnv): SlackBot {
   });
 
   chat.onNewMention(async (thread, message) => {
-    logger.log(`onNewMention thread=${thread.id} text="${message.text.slice(0, 80)}"`);
     await thread.subscribe();
-    await replyToThread(thread, message);
+    await replyToThread(thread, message, 'onNewMention');
   });
 
   chat.onDirectMessage(async (thread, message) => {
-    logger.log(`onDirectMessage thread=${thread.id} text="${message.text.slice(0, 80)}"`);
     await thread.subscribe();
-    await replyToThread(thread, message);
+    await replyToThread(thread, message, 'onDirectMessage');
   });
 
   chat.onSubscribedMessage(async (thread, message) => {
-    logger.log(`onSubscribedMessage thread=${thread.id} text="${message.text.slice(0, 80)}"`);
-    await replyToThread(thread, message);
+    await replyToThread(thread, message, 'onSubscribedMessage');
+  });
+
+  // Channel messages that are not a mention and not in a subscribed thread.
+  chat.onNewMessage(/^/, async (thread, message) => {
+    await replyToThread(thread, message, 'onNewMessage');
   });
 
   return chat;

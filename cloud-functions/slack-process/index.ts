@@ -114,7 +114,7 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
     );
 
     if (pending.length > 0) {
-      logger.log(`await ${pending.length} Chat SDK handler(s)`);
+      logger.log(`await ${pending.length} Chat SDK handler(s) until Slack post finishes`);
       await Promise.all(pending);
     }
 
