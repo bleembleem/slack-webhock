@@ -10,6 +10,7 @@
  *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
  *   edge-functions/slack-webhook/index.ts        → POST /slack-webhook         Slack Events API ack (HMAC + 200)
  *   cloud-functions/slack-process/index.ts       → POST /slack-process         Chat SDK worker (do not point Slack here)
+ *   cloud-functions/debug-log/index.ts           → POST /debug-log             Edge debug log sink (Cloud Function logs)
  *
  * This file defines all API paths and request wrappers.
  */
