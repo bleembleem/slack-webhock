@@ -21,7 +21,7 @@
 
 import type { CloudFunctionContext, EdgeoneRequest } from '@edgeone/types';
 import { createLogger } from '../_logger';
-import { getSlackBot, slackRequestContext } from '../_bot';
+import { getSlackBot, isSlackBotToken, normalizeSecret, slackRequestContext } from '../_bot';
 
 const logger = createLogger('slack-webhook');
 
@@ -63,8 +63,16 @@ async function readRawBody(request: EdgeoneRequest): Promise<string> {
   return '';
 }
 
-async function toStandardRequest(request: EdgeoneRequest): Promise<Request> {
-  const rawBody = await readRawBody(request);
+function isUrlVerification(rawBody: string): boolean {
+  try {
+    const payload = JSON.parse(rawBody) as { type?: unknown };
+    return payload?.type === 'url_verification';
+  } catch {
+    return false;
+  }
+}
+
+function toStandardRequest(request: EdgeoneRequest, rawBody: string): Request {
   return new Request(request.url, {
     method: request.method || 'POST',
     headers: request.headers,
@@ -81,19 +89,36 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
     return jsonResponse({ status: 'error', message: 'missing request' }, 400);
   }
 
-  const signingSecret = (context.env.SLACK_SIGNING_SECRET ?? '').trim();
-  const botToken = (context.env.SLACK_BOT_TOKEN ?? '').trim();
+  const signingSecret = normalizeSecret(context.env.SLACK_SIGNING_SECRET);
+  const botToken = normalizeSecret(context.env.SLACK_BOT_TOKEN);
   if (!signingSecret) {
     logger.error('SLACK_SIGNING_SECRET is not configured');
     return jsonResponse({ status: 'error', message: 'slack signing secret is not configured' }, 500);
   }
 
+  const rawBody = await readRawBody(request);
+  const challenge = isUrlVerification(rawBody);
+  const botTokenValid = isSlackBotToken(botToken);
+  logger.log(
+    `SLACK_BOT_TOKEN present=${Boolean(botToken)} format=${botTokenValid ? 'xoxb' : 'invalid'} challenge=${challenge}`,
+  );
+
+  if (!challenge && !botTokenValid) {
+    logger.error(
+      'SLACK_BOT_TOKEN must be the Bot User OAuth Token from Slack app → OAuth & Permissions. It starts with xoxb-.',
+    );
+    return jsonResponse({
+      status: 'error',
+      message: 'SLACK_BOT_TOKEN is invalid. Use the Bot User OAuth Token (xoxb-...), not the Client Secret or Signing Secret.',
+    }, 500);
+  }
+
   const bot = getSlackBot({
     SLACK_SIGNING_SECRET: signingSecret,
-    SLACK_BOT_TOKEN: botToken || undefined,
+    SLACK_BOT_TOKEN: botTokenValid ? botToken : undefined,
   });
 
-  const webRequest = await toStandardRequest(request);
+  const webRequest = toStandardRequest(request, rawBody);
   const origin = new URL(request.url).origin;
   const waitUntil = getWaitUntil(context);
   const mode = waitUntil ? 'waitUntil' : 'await';

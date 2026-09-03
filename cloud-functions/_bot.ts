@@ -27,6 +27,8 @@ export const slackRequestContext = new AsyncLocalStorage<RequestScope>();
 type SlackBot = Chat<{ slack: ReturnType<typeof createSlackAdapter> }>;
 
 let bot: SlackBot | undefined;
+let cachedToken = '';
+let cachedSigningSecret = '';
 
 async function collectSseText(res: Response): Promise<string> {
   const reader = res.body?.getReader();
@@ -124,6 +126,14 @@ async function replyToThread(thread: Thread, message: Message): Promise<void> {
   }
 }
 
+function normalizeSecret(value: string | undefined): string {
+  return (value ?? '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function isSlackBotToken(value: string): boolean {
+  return value.startsWith('xoxb-') && value.length > 20;
+}
+
 function createBot(env: SlackEnv): SlackBot {
   const chat = new Chat({
     userName: 'assistant',
@@ -154,12 +164,23 @@ function createBot(env: SlackEnv): SlackBot {
   return chat;
 }
 
+export { isSlackBotToken, normalizeSecret };
+
 export function getSlackBot(env: SlackEnv): SlackBot {
-  if (!bot) {
-    bot = createBot({
-      SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN || process.env.SLACK_BOT_TOKEN,
-      SLACK_SIGNING_SECRET: env.SLACK_SIGNING_SECRET || process.env.SLACK_SIGNING_SECRET,
-    });
+  const botToken = normalizeSecret(env.SLACK_BOT_TOKEN || process.env.SLACK_BOT_TOKEN);
+  const signingSecret = normalizeSecret(
+    env.SLACK_SIGNING_SECRET || process.env.SLACK_SIGNING_SECRET,
+  );
+
+  if (bot && cachedToken === botToken && cachedSigningSecret === signingSecret) {
+    return bot;
   }
+
+  bot = createBot({
+    SLACK_BOT_TOKEN: isSlackBotToken(botToken) ? botToken : undefined,
+    SLACK_SIGNING_SECRET: signingSecret || undefined,
+  });
+  cachedToken = botToken;
+  cachedSigningSecret = signingSecret;
   return bot;
 }
