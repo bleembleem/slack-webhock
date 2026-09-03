@@ -76,6 +76,21 @@ async function* withFallback(source: AsyncIterable<string>): AsyncIterable<strin
   if (!any) yield '(empty response)';
 }
 
+const MAKERS_CONVERSATION_ID_RE = /^[0-9A-Za-z._-]{6,36}$/;
+
+/**
+ * Agent 路由用 makers-conversation-id 做粘性会话。
+ * 只允许 6–36 位 [0-9A-Za-z._-]；Slack thread.id 含冒号，原样传入会 404
+ * `domain endpoints match fail`。
+ */
+function toMakersConversationId(threadId: string): string {
+  const normalized = threadId.replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (MAKERS_CONVERSATION_ID_RE.test(normalized)) return normalized;
+  const clipped = (normalized || 'slack').slice(0, 36);
+  if (clipped.length >= 6) return clipped;
+  return (clipped + 'xxxxxx').slice(0, 6);
+}
+
 async function streamAgent(opts: {
   origin: string;
   message: string;
@@ -83,11 +98,14 @@ async function streamAgent(opts: {
   conversationId: string;
   signal?: AbortSignal;
 }): Promise<AsyncIterable<string>> {
-  const res = await fetch(`${opts.origin}/chat`, {
+  const conversationId = toMakersConversationId(opts.conversationId);
+  const url = `${opts.origin}/chat`;
+  logger.log(`POST ${url} makers-conversation-id=${conversationId}`);
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'makers-conversation-id': opts.conversationId,
+      'makers-conversation-id': conversationId,
     },
     body: JSON.stringify({
       message: opts.message,

@@ -55,14 +55,24 @@ function toStandardRequest(request: EdgeoneRequest, rawBody: string): Request {
 }
 
 function requestOrigin(request: EdgeoneRequest): string {
+  const host = (
+    request.headers.get('eo-pages-host') ||
+    request.headers.get('x-forwarded-host') ||
+    request.headers.get('host') ||
+    ''
+  )
+    .split(',')[0]
+    .trim();
+  const proto = request.headers.get('x-forwarded-proto') || 'https';
+  if (host && !/tencentscf|localhost|127\.0\.0\.1/i.test(host)) {
+    return `${proto}://${host}`;
+  }
   try {
     const origin = new URL(request.url).origin;
     if (origin && origin !== 'null') return origin;
   } catch {
     /* relative or invalid URL */
   }
-  const host = request.headers.get('eo-pages-host') || request.headers.get('host') || '';
-  const proto = request.headers.get('x-forwarded-proto') || 'https';
   return host ? `${proto}://${host}` : '';
 }
 
@@ -102,6 +112,7 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
   const rawBody = await readRawBody(request);
   const webRequest = toStandardRequest(request, rawBody);
   const origin = requestOrigin(request);
+  logger.log(`origin=${origin} request.url=${request.url}`);
   const pending: Promise<unknown>[] = [];
 
   try {
