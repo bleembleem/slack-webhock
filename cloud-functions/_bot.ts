@@ -92,10 +92,18 @@ async function runAgent(opts: {
 }
 
 async function replyToThread(thread: Thread, message: Message): Promise<void> {
-  if (message.author.isMe || message.author.isBot === true) return;
+  if (message.author.isMe || message.author.isBot === true) {
+    logger.log(
+      `skip thread=${thread.id} isMe=${message.author.isMe} isBot=${message.author.isBot}`,
+    );
+    return;
+  }
 
   const text = message.text.trim();
-  if (!text) return;
+  if (!text) {
+    logger.log(`skip empty text thread=${thread.id} user=${message.author.userId}`);
+    return;
+  }
 
   const origin = slackRequestContext.getStore()?.origin;
   if (!origin) {
@@ -148,16 +156,19 @@ function createBot(env: SlackEnv): SlackBot {
   });
 
   chat.onNewMention(async (thread, message) => {
+    logger.log(`onNewMention thread=${thread.id} text="${message.text.slice(0, 80)}"`);
     await thread.subscribe();
     await replyToThread(thread, message);
   });
 
   chat.onDirectMessage(async (thread, message) => {
+    logger.log(`onDirectMessage thread=${thread.id} text="${message.text.slice(0, 80)}"`);
     await thread.subscribe();
     await replyToThread(thread, message);
   });
 
   chat.onSubscribedMessage(async (thread, message) => {
+    logger.log(`onSubscribedMessage thread=${thread.id} text="${message.text.slice(0, 80)}"`);
     await replyToThread(thread, message);
   });
 
