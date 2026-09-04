@@ -40,6 +40,9 @@ export const slackEdgeAdapter = {
     } catch {
       summary = `type=unparsed body_len=${rawBody.length}`;
     }
+    const sig = request.headers.get('x-slack-signature') ? 'yes' : 'no';
+    const ts = request.headers.get('x-slack-request-timestamp') ? 'yes' : 'no';
+    summary = `${summary} sig=${sig} ts=${ts}`;
     return retryNum ? `${summary} retry=${retryNum}` : summary;
   },
 };

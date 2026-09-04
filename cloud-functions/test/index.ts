@@ -86,7 +86,7 @@ async function pingDebugLog(origin: string, id: string): Promise<void> {
 export async function onRequestGet(context: TestContext): Promise<Response> {
   const request = context.request;
   if (!request) {
-    return new Response(null, { status: 200 });
+    return new Response('error: no request', { status: 500 });
   }
 
   const id = queryId(request);
@@ -94,10 +94,12 @@ export async function onRequestGet(context: TestContext): Promise<Response> {
   const loop = origin ? pingDebugLog(origin, id) : Promise.resolve();
 
   if (typeof context.waitUntil === 'function') {
+    console.log('using waitUntil');
     context.waitUntil(loop);
   } else {
+    console.log('not using waitUntil');
     void loop;
   }
 
-  return new Response(null, { status: 200 });
+  return new Response('Hello, world!', { status: 200 });
 }

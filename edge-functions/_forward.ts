@@ -6,6 +6,9 @@
  *   - proxy: await the process response (url_verification / PING)
  *   - ack: return 200 immediately, waitUntil the process call
  *
+ * Internal hop uses text/plain so the Cloud Function does not JSON-parse the
+ * body. Chat SDK HMAC needs the exact vendor bytes.
+ *
  * Avoid npm imports in edge-functions.
  */
 
@@ -51,6 +54,14 @@ export function requestOrigin(request: Request): string {
   return host ? `${proto}://${host}` : '';
 }
 
+/**
+ * Stash the vendor Content-Type so /chat-process can restore it for Chat SDK.
+ * The internal hop itself must not be application/json: EdgeOne Node Functions
+ * parse JSON and replace Request.body, which changes bytes and breaks HMAC.
+ */
+export const CHAT_CONTENT_TYPE_HEADER = 'x-chat-content-type';
+const RAW_FORWARD_CONTENT_TYPE = 'text/plain; charset=utf-8';
+
 export function pickHeaders(
   request: Request,
   names: readonly string[],
@@ -66,9 +77,9 @@ export function pickHeaders(
       if (value) headers.set(name, value);
     }
   }
-  if (!headers.has('content-type')) {
-    headers.set('content-type', 'application/json');
-  }
+  const originalContentType = headers.get('content-type') || 'application/json';
+  headers.set(CHAT_CONTENT_TYPE_HEADER, originalContentType);
+  headers.set('content-type', RAW_FORWARD_CONTENT_TYPE);
   return headers;
 }
 
