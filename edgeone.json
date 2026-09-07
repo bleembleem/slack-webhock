@@ -3,7 +3,9 @@
   "outputDirectory": "dist",
   "cloudFunctions": {
     "nodejs": {
-      "includeFiles": []
+      "includeFiles": [],
+      "maxDuration": 120,
+      "externalNodeModules": ["discord.js"]
     }
   },
   "agents": {

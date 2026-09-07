@@ -1,14 +1,14 @@
 /**
  * Shared Chat SDK webhook runner — private module, not mapped as a route.
  *
- * Vendor routes (e.g. POST /slack) call createVendorWebhook(). Handshake
- * replies immediately. Events ack 200 and keep processing after return —
- * Cloud Functions continue non-awaited work, so platform waitUntil is unused.
- * Signature verification happens inside bot.webhooks.<adapter>.
+ * Vendor routes (e.g. POST /slack, POST /discord) call createVendorWebhook().
+ * Slack events ack 200 and keep processing after return. Discord Interactions
+ * return the Chat SDK response (PING PONG / slash DEFERRED) so Discord's
+ * 3s window is met. Signature verification happens inside bot.webhooks.<adapter>.
  */
 
 import type { CloudFunctionContext, EdgeoneRequest } from '@edgeone/types';
-import type { VendorAdapter } from './_adapters';
+import type { VendorAdapter, VendorRespond } from './_adapters';
 import { getChatBot, requestContext, type ChatBot } from './_bot';
 import { createLogger } from './_logger';
 
@@ -32,6 +32,9 @@ const FALLBACK_HEADERS = [
   'x-slack-request-timestamp',
   'x-slack-retry-num',
   'x-slack-retry-reason',
+  'x-signature-ed25519',
+  'x-signature-timestamp',
+  'x-discord-gateway-token',
 ] as const;
 
 export function jsonResponse(data: unknown, status = 200): Response {
@@ -104,7 +107,7 @@ function toStandardRequest(request: EdgeoneRequest, rawBody: string): Request {
   });
 }
 
-function requestOrigin(request: EdgeoneRequest): string {
+export function requestOrigin(request: EdgeoneRequest): string {
   const host = (
     request.headers.get('eo-pages-host') ||
     request.headers.get('x-forwarded-host') ||
@@ -131,17 +134,22 @@ type WebhookHandler = (
   options?: { waitUntil?: (task: Promise<unknown>) => void },
 ) => Promise<Response>;
 
-function dispatchWebhook(bot: ChatBot, adapter: string, request: Request): Promise<Response> {
+function dispatchWebhook(
+  bot: ChatBot,
+  adapter: string,
+  request: Request,
+  pending: Promise<unknown>[],
+): Promise<Response> {
   const webhooks = bot.webhooks as unknown as Record<string, WebhookHandler | undefined>;
   const handler = webhooks[adapter];
   if (typeof handler !== 'function') {
     throw new Error(`chat adapter "${adapter}" is not registered`);
   }
-  // Chat SDK schedules handlers via waitUntil; void them so they keep running
-  // after this function returns. Do not use the platform waitUntil API.
+  // Chat SDK schedules handlers via waitUntil. Collect them so requestContext
+  // (origin) stays alive for the agent run after handleWebhook returns.
   return handler(request, {
     waitUntil: (task) => {
-      void Promise.resolve(task);
+      pending.push(Promise.resolve(task));
     },
   });
 }
@@ -151,6 +159,7 @@ export type RunChatWebhookOptions = {
   assertEnv: (env: Record<string, string | undefined>) => Response | void;
   handshake?: VendorAdapter['handshake'];
   summarize?: VendorAdapter['summarize'];
+  respond?: VendorAdapter['respond'];
 };
 
 export async function runChatWebhook(
@@ -183,33 +192,70 @@ export async function runChatWebhook(
   const webRequest = toStandardRequest(request, rawBody);
   const origin = requestOrigin(request);
   const env = context.env;
+  const respond: VendorRespond = opts.respond?.(rawBody, webRequest) ?? 'ack';
+  const hasVendorSig = Boolean(
+    webRequest.headers.get('x-slack-signature') ||
+      webRequest.headers.get('x-signature-ed25519') ||
+      webRequest.headers.get('x-discord-gateway-token'),
+  );
   logger.log(
     `origin=${origin} request.url=${request.url} body_len=${rawBody.length} body_kind=${incomingKind}` +
-      ` sig=${Boolean(webRequest.headers.get('x-slack-signature'))}` +
-      ` ts=${Boolean(webRequest.headers.get('x-slack-request-timestamp'))}` +
+      ` respond=${respond} sig=${hasVendorSig ? 'yes' : 'no'}` +
       ` ct=${webRequest.headers.get('content-type') || ''}`,
   );
   if (!rawBody) {
-    logger.error('empty webhook body; Chat SDK HMAC will fail');
+    logger.error('empty webhook body; Chat SDK verification will fail');
     return jsonResponse({ status: 'error', message: 'missing raw webhook body' }, 500);
   }
 
+  let settle!: (response: Response) => void;
+  let fail!: (error: unknown) => void;
+  let settled = false;
+  const firstResponse = new Promise<Response>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+
   const work = requestContext.run({ origin }, async () => {
+    const pending: Promise<unknown>[] = [];
     try {
       const bot = getChatBot(env);
-      const response = await dispatchWebhook(bot, opts.adapter, webRequest);
+      const response = await dispatchWebhook(bot, opts.adapter, webRequest, pending);
+      settled = true;
+      settle(response);
       if (!response.ok) {
         const detail = await response.clone().text().catch(() => '');
         logger.error(`chat webhook HTTP ${response.status}: ${detail.slice(0, 200)}`);
       }
+      await Promise.allSettled(pending);
       logger.log(`[${tag}] process done: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms`);
+      return response;
     } catch (e) {
       logger.error(`unhandled ${tag} error:`, e);
       logger.log(`[${tag}] process done: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms`);
+      if (!settled) fail(e);
+      throw e;
     }
   });
-  void work;
 
+  if (respond === 'sdk') {
+    try {
+      const response = await firstResponse;
+      void work.then(
+        () => undefined,
+        () => undefined,
+      );
+      logger.log(`[${tag}] sdk reply elapsed=${Date.now() - startTime}ms status=${response.status}`);
+      return response;
+    } catch {
+      return jsonResponse({ status: 'error', message: `unhandled ${tag} error` }, 500);
+    }
+  }
+
+  void work.then(
+    () => undefined,
+    () => undefined,
+  );
   logger.log(`[${tag}] ack elapsed=${Date.now() - startTime}ms`);
   return emptyOk();
 }
@@ -221,6 +267,7 @@ export function createVendorWebhook(adapter: VendorAdapter) {
       assertEnv: adapter.assertEnv,
       handshake: adapter.handshake,
       summarize: adapter.summarize,
+      respond: adapter.respond,
     });
   };
 }

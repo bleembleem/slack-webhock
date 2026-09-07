@@ -9,6 +9,8 @@
  *   cloud-functions/clear-history/index.ts       → POST /clear-history         Clear messages of one conversation
  *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
  *   cloud-functions/slack/index.ts               → POST /slack                 Slack Events API (ack + Chat SDK handle)
+ *   cloud-functions/discord/index.ts             → POST /discord               Discord Interactions (PING / slash / buttons)
+ *   cloud-functions/discord/gateway/index.ts     → GET /discord/gateway        Discord Gateway listener (regular messages)
  *   cloud-functions/debug-log/index.ts           → POST /debug-log             Debug log sink (Cloud Function logs)
  *   cloud-functions/test/index.ts                → GET /test                   Probe endpoint
  *

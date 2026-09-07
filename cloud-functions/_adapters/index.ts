@@ -9,9 +9,12 @@
  *   long-lived listener outside this webhook route.
  */
 
+import { discordAdapter, type DiscordEnv } from './discord';
 import { slackAdapter, type SlackEnv } from './slack';
 
-export type BotEnv = SlackEnv;
+export type BotEnv = SlackEnv & DiscordEnv;
+
+export type VendorRespond = 'sdk' | 'ack';
 
 export type VendorAdapter = {
   name: string;
@@ -21,21 +24,29 @@ export type VendorAdapter = {
     rawBody: string,
     request: { headers: { get(name: string): string | null } },
   ) => string;
+  /** Default `ack`. Discord Interactions must `sdk` so PING/DEFERRED reach Discord. */
+  respond?: (
+    rawBody: string,
+    request: { headers: { get(name: string): string | null } },
+  ) => VendorRespond;
 };
 
 export type ChatAdapters = {
   slack?: NonNullable<ReturnType<typeof slackAdapter.create>>;
+  discord?: NonNullable<ReturnType<typeof discordAdapter.create>>;
 };
 
 export function resolveBotEnv(env: BotEnv): BotEnv {
   return {
     ...slackAdapter.resolveEnv(env),
+    ...discordAdapter.resolveEnv(env),
   };
 }
 
 export function envFingerprint(env: BotEnv): string {
   return JSON.stringify({
     ...slackAdapter.fingerprint(env),
+    ...discordAdapter.fingerprint(env),
   });
 }
 
@@ -43,7 +54,9 @@ export function buildAdapters(env: BotEnv): ChatAdapters {
   const adapters: ChatAdapters = {};
   const slack = slackAdapter.create(env);
   if (slack) adapters.slack = slack;
+  const discord = discordAdapter.create(env);
+  if (discord) adapters.discord = discord;
   return adapters;
 }
 
-export { slackAdapter };
+export { discordAdapter, slackAdapter };

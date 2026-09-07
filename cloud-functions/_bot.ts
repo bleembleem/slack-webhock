@@ -3,13 +3,15 @@
  *
  * One Chat instance, pluggable adapters. Handlers are platform-agnostic.
  * Register vendors in `_adapters/` (add `<name>.ts` and wire it in
- * `_adapters/index.ts`). Vendor routes (POST /slack, …) ack immediately;
- * `bot.webhooks.<name>` verifies signatures and handles the event after return.
+ * `_adapters/index.ts`). Vendor routes (POST /slack, POST /discord, …)
+ * dispatch through `_process.ts`. Slack acks immediately; Discord Interactions
+ * return Chat SDK's PONG/DEFERRED. Regular Discord messages need GET /discord/gateway.
  *
  * Add a vendor:
  *   1. package.json: @chat-adapter/<name>
  *   2. cloud-functions/_adapters/<name>.ts and wire create / resolveEnv / fingerprint
  *   3. cloud-functions/<name>/index.ts with createVendorWebhook
+ *   Discord also needs cloud-functions/discord/gateway (Gateway WebSocket).
  *
  * Memory state adapter keeps subscriptions/locks in-process (lost on restart).
  * /chat already emits SSE text_delta; we adapt that iterable into post().
@@ -17,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { Chat, type Message, type SentMessage, type Thread } from 'chat';
+import { Chat, type Channel, type Message, type SentMessage, type Thread } from 'chat';
 import { createMemoryState } from '@chat-adapter/state-memory';
 import {
   buildAdapters,
@@ -176,6 +178,53 @@ async function editChannelStream(
   await flush(true);
 }
 
+async function streamToChannel(opts: {
+  channel: Channel;
+  text: string;
+  platform: string;
+  userId: string;
+  conversationId: string;
+  signal?: AbortSignal;
+  source: string;
+}): Promise<void> {
+  const origin = requestContext.getStore()?.origin;
+  if (!origin) {
+    logger.error('missing request origin; cannot call /chat');
+    await opts.channel.post('Sorry, I could not complete that request.');
+    return;
+  }
+
+  logger.log(
+    `${opts.source} platform=${opts.platform} conversation=${opts.conversationId} user=${opts.userId} text="${opts.text.slice(0, 50)}"`,
+  );
+
+  let placeholder: SentMessage | undefined;
+  try {
+    placeholder = await opts.channel.post(CHANNEL_THINKING);
+    const stream = await streamAgent({
+      origin,
+      message: opts.text,
+      platform: opts.platform,
+      userId: `${opts.platform}:${opts.userId}`,
+      conversationId: opts.conversationId,
+      signal: opts.signal,
+    });
+    await editChannelStream(placeholder, stream);
+    logger.log(`${opts.source} posted channel message conversation=${opts.conversationId}`);
+  } catch (e) {
+    logger.error('failed to handle thread:', e);
+    try {
+      if (placeholder) {
+        await placeholder.edit('Sorry, I could not complete that request.');
+      } else {
+        await opts.channel.post('Sorry, I could not complete that request.');
+      }
+    } catch (postErr) {
+      logger.error('failed to post error reply:', postErr);
+    }
+  }
+}
+
 async function replyToThread(thread: Thread, message: Message, source: string): Promise<void> {
   if (message.author.isMe || message.author.isBot === true) {
     logger.log(
@@ -184,44 +233,15 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
     return;
   }
 
-  const text = message.text.trim() || '(The user sent a message with no text.)';
-  const origin = requestContext.getStore()?.origin;
-  if (!origin) {
-    logger.error('missing request origin; cannot call /chat');
-    await thread.channel.post('Sorry, I could not complete that request.');
-    return;
-  }
-
-  const platform = platformFromThreadId(thread.id);
-  logger.log(
-    `${source} platform=${platform} thread=${thread.id} user=${message.author.userId} text="${text.slice(0, 50)}"`,
-  );
-
-  let placeholder: SentMessage | undefined;
-  try {
-    placeholder = await thread.channel.post(CHANNEL_THINKING);
-    const stream = await streamAgent({
-      origin,
-      message: text,
-      platform,
-      userId: `${platform}:${message.author.userId}`,
-      conversationId: thread.id,
-      signal: thread.signal,
-    });
-    await editChannelStream(placeholder, stream);
-    logger.log(`${source} posted channel message thread=${thread.id}`);
-  } catch (e) {
-    logger.error('failed to handle thread:', e);
-    try {
-      if (placeholder) {
-        await placeholder.edit('Sorry, I could not complete that request.');
-      } else {
-        await thread.channel.post('Sorry, I could not complete that request.');
-      }
-    } catch (postErr) {
-      logger.error('failed to post error reply:', postErr);
-    }
-  }
+  await streamToChannel({
+    channel: thread.channel,
+    text: message.text.trim() || '(The user sent a message with no text.)',
+    platform: platformFromThreadId(thread.id),
+    userId: message.author.userId,
+    conversationId: thread.id,
+    signal: thread.signal,
+    source,
+  });
 }
 
 function createBot(env: BotEnv): ChatBot {
@@ -242,8 +262,23 @@ function createBot(env: BotEnv): ChatBot {
   });
 
   chat.onDirectMessage(async (thread, message) => {
-    if (!message.isMention) return;
     await replyToThread(thread, message, 'onDirectMessage');
+  });
+
+  chat.onSlashCommand(async (event) => {
+    if (event.user.isMe || event.user.isBot === true) {
+      logger.log(`skip onSlashCommand isMe=${event.user.isMe} isBot=${event.user.isBot}`);
+      return;
+    }
+    const text = event.text.trim() || event.command;
+    await streamToChannel({
+      channel: event.channel,
+      text,
+      platform: platformFromThreadId(event.channel.id),
+      userId: event.user.userId,
+      conversationId: event.channel.id,
+      source: `onSlashCommand:${event.command}`,
+    });
   });
 
   return chat;
