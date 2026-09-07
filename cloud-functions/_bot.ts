@@ -162,7 +162,7 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
   const origin = requestContext.getStore()?.origin;
   if (!origin) {
     logger.error('missing request origin; cannot call /chat');
-    await thread.channel.post('Sorry, I could not complete that request.');
+    await thread.post('Sorry, I could not complete that request.');
     return;
   }
 
@@ -186,12 +186,12 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
       conversationId: thread.id,
       signal: thread.signal,
     });
-    await thread.channel.post(stream);
-    logger.log(`${source} posted new channel message thread=${thread.id}`);
+    await thread.post(stream);
+    logger.log(`${source} posted thread reply thread=${thread.id}`);
   } catch (e) {
     logger.error('failed to handle thread:', e);
     try {
-      await thread.channel.post('Sorry, I could not complete that request.');
+      await thread.post('Sorry, I could not complete that request.');
     } catch (postErr) {
       logger.error('failed to post error reply:', postErr);
     }
