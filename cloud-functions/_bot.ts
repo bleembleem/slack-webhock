@@ -238,22 +238,12 @@ function createBot(env: BotEnv): ChatBot {
   });
 
   chat.onNewMention(async (thread, message) => {
-    await thread.subscribe();
     await replyToThread(thread, message, 'onNewMention');
   });
 
   chat.onDirectMessage(async (thread, message) => {
-    await thread.subscribe();
+    if (!message.isMention) return;
     await replyToThread(thread, message, 'onDirectMessage');
-  });
-
-  chat.onSubscribedMessage(async (thread, message) => {
-    await replyToThread(thread, message, 'onSubscribedMessage');
-  });
-
-  // Channel messages that are not a mention and not in a subscribed thread.
-  chat.onNewMessage(/^/, async (thread, message) => {
-    await replyToThread(thread, message, 'onNewMessage');
   });
 
   return chat;
