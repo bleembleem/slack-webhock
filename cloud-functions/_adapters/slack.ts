@@ -56,6 +56,57 @@ export function createSlackChatAdapter(env: SlackEnv) {
   });
 }
 
+function slackChallenge(rawBody: string, parsedBody?: unknown): string | undefined {
+  if (rawBody) {
+    try {
+      const payload = JSON.parse(rawBody) as { type?: unknown; challenge?: unknown };
+      if (payload?.type === 'url_verification' && typeof payload.challenge === 'string') {
+        return payload.challenge;
+      }
+    } catch {
+      /* not JSON */
+    }
+  }
+  if (parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)) {
+    const payload = parsedBody as { type?: unknown; challenge?: unknown };
+    if (payload.type === 'url_verification' && typeof payload.challenge === 'string') {
+      return payload.challenge;
+    }
+  }
+  return undefined;
+}
+
+export function slackHandshake(rawBody: string, parsedBody?: unknown): Response | undefined {
+  const challenge = slackChallenge(rawBody, parsedBody);
+  if (!challenge) return undefined;
+  return jsonResponse({ challenge });
+}
+
+export function slackSummarize(
+  rawBody: string,
+  request: { headers: { get(name: string): string | null } },
+): string {
+  const retryNum = request.headers.get('x-slack-retry-num')?.trim();
+  let summary: string;
+  try {
+    const payload = JSON.parse(rawBody) as {
+      type?: unknown;
+      event_id?: unknown;
+      event?: { type?: unknown };
+    };
+    const type = typeof payload.type === 'string' ? payload.type : '';
+    const eventType = typeof payload.event?.type === 'string' ? payload.event.type : '';
+    const eventId = typeof payload.event_id === 'string' ? payload.event_id : '';
+    summary = `type=${type} event=${eventType} event_id=${eventId} body_len=${rawBody.length}`;
+  } catch {
+    summary = `type=unparsed body_len=${rawBody.length}`;
+  }
+  const sig = request.headers.get('x-slack-signature') ? 'yes' : 'no';
+  const ts = request.headers.get('x-slack-request-timestamp') ? 'yes' : 'no';
+  summary = `${summary} sig=${sig} ts=${ts}`;
+  return retryNum ? `${summary} retry=${retryNum}` : summary;
+}
+
 export function assertSlackEnv(env: Record<string, string | undefined>): Response | void {
   const signingSecret = normalizeSecret(env.SLACK_SIGNING_SECRET);
   const botToken = normalizeSecret(env.SLACK_BOT_TOKEN);
@@ -83,4 +134,6 @@ export const slackAdapter = {
   fingerprint: slackFingerprint,
   create: createSlackChatAdapter,
   assertEnv: assertSlackEnv,
+  handshake: slackHandshake,
+  summarize: slackSummarize,
 };

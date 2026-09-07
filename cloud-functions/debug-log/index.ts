@@ -1,12 +1,11 @@
 /**
- * Edge debug log sink — EdgeOne Makers Node Function
- * ==================================================
+ * Debug log sink — EdgeOne Makers Node Function
+ * =============================================
  *
  * File path cloud-functions/debug-log/index.ts maps to **POST /debug-log**.
  *
- * Edge Function console.log is not reported. Edge POSTs aggregated batches
- * here so they show up as one Cloud Function log block per flush.
- * Not a Slack URL. Stay fast: no extra I/O, return 200 immediately.
+ * Accepts aggregated log batches and prints them as one Cloud Function log
+ * block per flush. Not a Slack URL. Stay fast: no extra I/O, return 200.
  */
 
 import type { CloudFunctionContext } from '@edgeone/types';

@@ -8,10 +8,9 @@
  *   cloud-functions/conversations/index.ts       → POST /conversations         List conversations for a user
  *   cloud-functions/clear-history/index.ts       → POST /clear-history         Clear messages of one conversation
  *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
- *   edge-functions/slack/index.ts                → POST /slack                 Slack Events API ack (classify + forward)
- *   cloud-functions/chat-process/index.ts        → POST /chat-process          Chat SDK worker (verify + handle; do not point vendors here)
- *   cloud-functions/debug-log/index.ts           → POST /debug-log             Edge debug log sink (Cloud Function logs)
- *   cloud-functions/test/index.ts                → GET /test                   Empty ack; waitUntil POSTs /debug-log every second
+ *   cloud-functions/slack/index.ts               → POST /slack                 Slack Events API (ack + Chat SDK handle)
+ *   cloud-functions/debug-log/index.ts           → POST /debug-log             Debug log sink (Cloud Function logs)
+ *   cloud-functions/test/index.ts                → GET /test                   Probe endpoint
  *
  * This file defines all API paths and request wrappers.
  */

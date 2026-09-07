@@ -1,18 +1,13 @@
 /**
- * Background waitUntil probe — EdgeOne Makers Node Function
- * =========================================================
+ * Background work probe — EdgeOne Makers Node Function
+ * ====================================================
  *
  * File path cloud-functions/test/index.ts maps to **GET /test**.
  *
- * Returns an empty 200 immediately, then POSTs /debug-log every second
- * (id + timestamp) until the platform kills the isolate.
+ * Returns immediately. Non-awaited work continues after the response.
  */
 
 import type { CloudFunctionContext, EdgeoneRequest } from '@edgeone/types';
-
-type TestContext = CloudFunctionContext & {
-  waitUntil?: (promise: Promise<unknown>) => void;
-};
 
 function requestOrigin(request: EdgeoneRequest): string {
   const host = (
@@ -83,23 +78,15 @@ async function pingDebugLog(origin: string, id: string): Promise<void> {
   }
 }
 
-export async function onRequestGet(context: TestContext): Promise<Response> {
+export async function onRequestGet(context: CloudFunctionContext): Promise<Response> {
   const request = context.request;
   if (!request) {
     return new Response('error: no request', { status: 500 });
   }
-  
+
   // const id = queryId(request);
   // const origin = requestOrigin(request);
-  // const loop = origin ? pingDebugLog(origin, id) : Promise.resolve();
-
-  // if (typeof context.waitUntil === 'function') {
-  //   console.log('using waitUntil');
-  //   context.waitUntil(loop);
-  // } else {
-  //   console.log('not using waitUntil');
-  //   void loop;
-  // }
+  // void (origin ? pingDebugLog(origin, id) : Promise.resolve());
 
   return new Response('test end', { status: 200 });
 }

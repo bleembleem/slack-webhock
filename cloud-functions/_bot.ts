@@ -3,14 +3,13 @@
  *
  * One Chat instance, pluggable adapters. Handlers are platform-agnostic.
  * Register vendors in `_adapters/` (add `<name>.ts` and wire it in
- * `_adapters/index.ts`). Adapters verify signatures in POST /chat-process
- * (bot.webhooks.<name>); the edge function only classifies handshake vs
- * event and forwards the raw body + signature headers.
+ * `_adapters/index.ts`). Vendor routes (POST /slack, …) ack immediately;
+ * `bot.webhooks.<name>` verifies signatures and handles the event after return.
  *
  * Add a vendor:
  *   1. package.json: @chat-adapter/<name>
- *   2. edge-functions/_adapters/<name>.ts + edge-functions/<name>/index.ts
- *   3. cloud-functions/_adapters/<name>.ts and wire create / resolveEnv / fingerprint
+ *   2. cloud-functions/_adapters/<name>.ts and wire create / resolveEnv / fingerprint
+ *   3. cloud-functions/<name>/index.ts with createVendorWebhook
  *
  * Memory state adapter keeps subscriptions/locks in-process (lost on restart).
  * /chat already emits SSE text_delta; we adapt that iterable into post().

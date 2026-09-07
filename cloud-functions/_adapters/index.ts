@@ -3,12 +3,10 @@
  *
  * Add a vendor:
  *   1. package.json: @chat-adapter/<name>
- *   2. edge-functions/_adapters/<name>.ts + edge-functions/<name>/index.ts
- *      (classify handshake → proxy, else ack; forward signature headers).
- *      Do not re-verify on the edge.
- *   3. this directory: <name>.ts, then wire create / resolveEnv / fingerprint below.
+ *   2. this directory: <name>.ts, then wire create / resolveEnv / fingerprint
+ *   3. cloud-functions/<name>/index.ts with createVendorWebhook(<name>Adapter)
  *   If the vendor has no HTTP events (e.g. Discord Gateway messages), add a
- *   long-lived listener outside this edge/process pair.
+ *   long-lived listener outside this webhook route.
  */
 
 import { slackAdapter, type SlackEnv } from './slack';
@@ -18,20 +16,16 @@ export type BotEnv = SlackEnv;
 export type VendorAdapter = {
   name: string;
   assertEnv: (env: Record<string, string | undefined>) => Response | void;
+  handshake?: (rawBody: string, parsedBody?: unknown) => Response | undefined;
+  summarize?: (
+    rawBody: string,
+    request: { headers: { get(name: string): string | null } },
+  ) => string;
 };
 
 export type ChatAdapters = {
   slack?: NonNullable<ReturnType<typeof slackAdapter.create>>;
 };
-
-const vendors: Record<string, VendorAdapter> = {
-  [slackAdapter.name]: slackAdapter,
-};
-
-export function getVendorAdapter(name: string | null | undefined): VendorAdapter | undefined {
-  if (!name) return undefined;
-  return vendors[name];
-}
 
 export function resolveBotEnv(env: BotEnv): BotEnv {
   return {
