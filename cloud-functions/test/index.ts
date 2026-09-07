@@ -88,18 +88,18 @@ export async function onRequestGet(context: TestContext): Promise<Response> {
   if (!request) {
     return new Response('error: no request', { status: 500 });
   }
+  
+  // const id = queryId(request);
+  // const origin = requestOrigin(request);
+  // const loop = origin ? pingDebugLog(origin, id) : Promise.resolve();
 
-  const id = queryId(request);
-  const origin = requestOrigin(request);
-  const loop = origin ? pingDebugLog(origin, id) : Promise.resolve();
+  // if (typeof context.waitUntil === 'function') {
+  //   console.log('using waitUntil');
+  //   context.waitUntil(loop);
+  // } else {
+  //   console.log('not using waitUntil');
+  //   void loop;
+  // }
 
-  if (typeof context.waitUntil === 'function') {
-    console.log('using waitUntil');
-    context.waitUntil(loop);
-  } else {
-    console.log('not using waitUntil');
-    void loop;
-  }
-
-  return new Response('Hello, world!', { status: 200 });
+  return new Response('test end', { status: 200 });
 }

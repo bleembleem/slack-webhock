@@ -26,6 +26,8 @@ export type VendorEdgeAdapter = {
   name: string;
   headers: readonly string[];
   classify: (rawBody: string) => DispatchMode;
+  /** Immediate reply for vendor handshake (Slack url_verification). */
+  handshake?: (rawBody: string) => Response | undefined;
   summarize?: (rawBody: string, request: Request) => string;
 };
 
@@ -45,6 +47,13 @@ export function createVendorWebhook(adapter: VendorEdgeAdapter) {
 
     const rawBody = await readRawBody(request);
     logger.log(adapter.summarize?.(rawBody, request) ?? `body_len=${rawBody.length}`);
+
+    const handshake = adapter.handshake?.(rawBody);
+    if (handshake) {
+      logger.log('handshake reply');
+      await logger.flush({ final: true });
+      return handshake;
+    }
 
     if (!origin) {
       logger.error('could not resolve request origin for chat-process');

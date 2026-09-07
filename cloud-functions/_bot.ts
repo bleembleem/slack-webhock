@@ -245,3 +245,4 @@ export function getChatBot(env: BotEnv): ChatBot {
   cachedFingerprint = fingerprint;
   return bot;
 }
+

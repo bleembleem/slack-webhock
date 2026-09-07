@@ -4,10 +4,9 @@
  *
  * File path edge-functions/slack/index.ts maps to **POST /slack**.
  *
- * Point Slack's Events API Request URL here. This function does not verify
- * the signature. It classifies url_verification (proxy, await process) vs
- * events (ack 200, waitUntil process). Chat SDK verifies HMAC in
- * POST /chat-process.
+ * Point Slack's Events API Request URL here. url_verification is answered
+ * immediately with `{ challenge }`. Events are acked 200 then waitUntil
+ * forwarded to POST /chat-process, where Chat SDK verifies HMAC.
  *
  * Edge console.log is not reported; lines are flushed to POST /debug-log.
  */

@@ -31,6 +31,27 @@ export function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
+function urlVerificationChallenge(rawBody: string): string | undefined {
+  try {
+    const payload = JSON.parse(rawBody) as { type?: unknown; challenge?: unknown };
+    if (payload?.type === 'url_verification' && typeof payload.challenge === 'string') {
+      return payload.challenge;
+    }
+  } catch {
+    /* not JSON */
+  }
+  return undefined;
+}
+
+function urlVerificationChallengeFromParsed(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const payload = body as { type?: unknown; challenge?: unknown };
+  if (payload.type === 'url_verification' && typeof payload.challenge === 'string') {
+    return payload.challenge;
+  }
+  return undefined;
+}
+
 function bodyKind(body: unknown): string {
   if (typeof body === 'string') return 'string';
   if (body instanceof ArrayBuffer) return 'arraybuffer';
@@ -154,12 +175,19 @@ export async function runChatWebhook(
     return jsonResponse({ status: 'error', message: 'missing request' }, 400);
   }
 
+  const incomingKind = bodyKind(request.body);
+  const parsedChallenge = urlVerificationChallengeFromParsed(request.body);
+  const rawBody = await readRawBody(request);
+  const challenge = urlVerificationChallenge(rawBody) ?? parsedChallenge;
+  if (challenge) {
+    logger.log(`url_verification challenge body_kind=${incomingKind} body_len=${rawBody.length}`);
+    return jsonResponse({ challenge });
+  }
+
   const envError = opts.assertEnv(context.env);
   if (envError) return envError;
 
   const bot = getChatBot(context.env);
-  const incomingKind = bodyKind(request.body);
-  const rawBody = await readRawBody(request);
   const webRequest = toStandardRequest(request, rawBody);
   const origin = requestOrigin(request);
   logger.log(

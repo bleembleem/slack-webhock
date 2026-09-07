@@ -36,10 +36,24 @@ export function emptyOk(): Response {
 
 export async function readRawBody(request: Request): Promise<string> {
   try {
-    return await request.text();
+    const text = await request.text();
+    if (text) return text;
   } catch {
-    return '';
+    /* stream already consumed by the runtime */
   }
+
+  const body = (request as Request & { body?: unknown }).body;
+  if (typeof body === 'string') return body;
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+  if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+  if (body && typeof body === 'object' && !(body instanceof ReadableStream)) {
+    try {
+      return JSON.stringify(body);
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 export function requestOrigin(request: Request): string {
@@ -141,7 +155,9 @@ export async function dispatchToProcess(opts: DispatchToProcessOptions): Promise
 
   if (mode === 'proxy') {
     try {
-      return await runForward();
+      const res = await runForward();
+      const body = await res.arrayBuffer();
+      return new Response(body, { status: res.status, headers: res.headers });
     } catch (e) {
       opts.logger.error('failed to proxy handshake to process:', e);
       await opts.logger.flush({ final: true });

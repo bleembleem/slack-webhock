@@ -1,10 +1,23 @@
 /**
  * Slack edge adapter — classify handshake vs event and name signature headers.
  *
- * Do not verify HMAC here. Chat SDK verifies in POST /chat-process.
+ * url_verification is answered here (echo challenge). Slack's 3s window cannot
+ * wait for /chat-process. Events are acked and forwarded; Chat SDK verifies HMAC.
  */
 
-import type { DispatchMode } from '../_forward';
+import { jsonResponse, type DispatchMode } from '../_forward';
+
+function slackChallenge(rawBody: string): string | undefined {
+  try {
+    const payload = JSON.parse(rawBody) as { type?: unknown; challenge?: unknown };
+    if (payload?.type === 'url_verification' && typeof payload.challenge === 'string') {
+      return payload.challenge;
+    }
+  } catch {
+    /* not JSON */
+  }
+  return undefined;
+}
 
 export const slackEdgeAdapter = {
   name: 'slack' as const,
@@ -15,13 +28,13 @@ export const slackEdgeAdapter = {
     'x-slack-retry-num',
     'x-slack-retry-reason',
   ] as const,
+  handshake(rawBody: string): Response | undefined {
+    const challenge = slackChallenge(rawBody);
+    if (!challenge) return undefined;
+    return jsonResponse({ challenge });
+  },
   classify(rawBody: string): DispatchMode {
-    try {
-      const payload = JSON.parse(rawBody) as { type?: unknown };
-      if (payload?.type === 'url_verification') return 'proxy';
-    } catch {
-      /* not JSON */
-    }
+    if (slackChallenge(rawBody)) return 'proxy';
     return 'ack';
   },
   summarize(rawBody: string, request: Request): string {
