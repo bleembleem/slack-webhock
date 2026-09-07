@@ -17,7 +17,7 @@
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { Chat, type Message, type Thread } from 'chat';
+import { Chat, type Message, type SentMessage, type Thread } from 'chat';
 import { createMemoryState } from '@chat-adapter/state-memory';
 import {
   buildAdapters,
@@ -150,6 +150,32 @@ async function streamAgent(opts: {
   return withFallback(sseTextDeltas(res));
 }
 
+const CHANNEL_THINKING = 'Thinking…';
+const CHANNEL_STREAM_EDIT_MS = 500;
+
+async function editChannelStream(
+  posted: SentMessage,
+  source: AsyncIterable<string>,
+): Promise<void> {
+  let text = '';
+  let lastPosted = CHANNEL_THINKING;
+  let lastEditAt = 0;
+
+  const flush = async (force: boolean) => {
+    if (!text || text === lastPosted) return;
+    if (!force && Date.now() - lastEditAt < CHANNEL_STREAM_EDIT_MS) return;
+    await posted.edit({ markdown: text });
+    lastPosted = text;
+    lastEditAt = Date.now();
+  };
+
+  for await (const chunk of source) {
+    text += chunk;
+    await flush(false);
+  }
+  await flush(true);
+}
+
 async function replyToThread(thread: Thread, message: Message, source: string): Promise<void> {
   if (message.author.isMe || message.author.isBot === true) {
     logger.log(
@@ -171,7 +197,9 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
     `${source} platform=${platform} thread=${thread.id} user=${message.author.userId} text="${text.slice(0, 50)}"`,
   );
 
+  let placeholder: SentMessage | undefined;
   try {
+    placeholder = await thread.channel.post(CHANNEL_THINKING);
     const stream = await streamAgent({
       origin,
       message: text,
@@ -180,12 +208,16 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
       conversationId: thread.id,
       signal: thread.signal,
     });
-    await thread.channel.post(stream);
+    await editChannelStream(placeholder, stream);
     logger.log(`${source} posted channel message thread=${thread.id}`);
   } catch (e) {
     logger.error('failed to handle thread:', e);
     try {
-      await thread.channel.post('Sorry, I could not complete that request.');
+      if (placeholder) {
+        await placeholder.edit('Sorry, I could not complete that request.');
+      } else {
+        await thread.channel.post('Sorry, I could not complete that request.');
+      }
     } catch (postErr) {
       logger.error('failed to post error reply:', postErr);
     }
