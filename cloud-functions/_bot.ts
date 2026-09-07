@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { Chat, type Channel, type Message, type SentMessage, type Thread } from 'chat';
+import { Chat, type Message, type SentMessage, type Thread } from 'chat';
 import { createMemoryState } from '@chat-adapter/state-memory';
 import {
   buildAdapters,
@@ -179,7 +179,7 @@ async function editChannelStream(
 }
 
 async function streamToChannel(opts: {
-  channel: Channel;
+  post: (text: string) => Promise<SentMessage>;
   text: string;
   platform: string;
   userId: string;
@@ -190,7 +190,7 @@ async function streamToChannel(opts: {
   const origin = requestContext.getStore()?.origin;
   if (!origin) {
     logger.error('missing request origin; cannot call /chat');
-    await opts.channel.post('Sorry, I could not complete that request.');
+    await opts.post('Sorry, I could not complete that request.');
     return;
   }
 
@@ -200,7 +200,7 @@ async function streamToChannel(opts: {
 
   let placeholder: SentMessage | undefined;
   try {
-    placeholder = await opts.channel.post(CHANNEL_THINKING);
+    placeholder = await opts.post(CHANNEL_THINKING);
     const stream = await streamAgent({
       origin,
       message: opts.text,
@@ -212,15 +212,17 @@ async function streamToChannel(opts: {
     await editChannelStream(placeholder, stream);
     logger.log(`${opts.source} posted channel message conversation=${opts.conversationId}`);
   } catch (e) {
-    logger.error('failed to handle thread:', e);
+    const detail = e instanceof Error ? e.stack || e.message : String(e);
+    logger.error(`failed to handle thread: ${detail}`);
     try {
       if (placeholder) {
         await placeholder.edit('Sorry, I could not complete that request.');
       } else {
-        await opts.channel.post('Sorry, I could not complete that request.');
+        await opts.post('Sorry, I could not complete that request.');
       }
     } catch (postErr) {
-      logger.error('failed to post error reply:', postErr);
+      const postDetail = postErr instanceof Error ? postErr.message : String(postErr);
+      logger.error(`failed to post error reply: ${postDetail}`);
     }
   }
 }
@@ -234,7 +236,7 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
   }
 
   await streamToChannel({
-    channel: thread.channel,
+    post: (text) => thread.post(text),
     text: message.text.trim() || '(The user sent a message with no text.)',
     platform: platformFromThreadId(thread.id),
     userId: message.author.userId,
@@ -272,13 +274,21 @@ function createBot(env: BotEnv): ChatBot {
     }
     const text = event.text.trim() || event.command;
     await streamToChannel({
-      channel: event.channel,
+      post: (markdown) => event.channel.post(markdown),
       text,
       platform: platformFromThreadId(event.channel.id),
       userId: event.user.userId,
       conversationId: event.channel.id,
       source: `onSlashCommand:${event.command}`,
     });
+  });
+
+  chat.onNewMessage(/.*/, async (thread, message) => {
+    logger.log(
+      `onNewMessage no mention/dm handler thread=${thread.id}` +
+        ` isMention=${message.isMention} isBot=${message.author.isBot}` +
+        ` user=${message.author.userId} text="${message.text.slice(0, 80)}"`,
+    );
   });
 
   return chat;

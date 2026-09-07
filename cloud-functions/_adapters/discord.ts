@@ -121,8 +121,31 @@ export function discordSummarize(
   const sig = request.headers.get('x-signature-ed25519') ? 'yes' : 'no';
   const ts = request.headers.get('x-signature-timestamp') ? 'yes' : 'no';
   try {
-    const payload = JSON.parse(rawBody) as { type?: unknown };
+    const payload = JSON.parse(rawBody) as {
+      type?: unknown;
+      data?: {
+        id?: unknown;
+        content?: unknown;
+        channel_id?: unknown;
+        guild_id?: unknown;
+        author?: { id?: unknown; username?: unknown; bot?: unknown };
+        mentions?: Array<{ id?: unknown }>;
+        mention_roles?: unknown[];
+      };
+    };
     const type = typeof payload.type === 'string' || typeof payload.type === 'number' ? payload.type : '';
+    if (type === 'GATEWAY_MESSAGE_CREATE' && payload.data) {
+      const data = payload.data;
+      const content = typeof data.content === 'string' ? data.content.slice(0, 80) : '';
+      const mentionIds = Array.isArray(data.mentions) ? data.mentions.map((m) => String(m?.id ?? '')).filter(Boolean) : [];
+      return (
+        `type=${type} body_len=${rawBody.length} gateway_fwd=${forwarded}` +
+        ` guild=${data.guild_id ?? 'dm'} channel=${data.channel_id ?? ''}` +
+        ` author=${data.author?.username ?? ''} bot=${data.author?.bot === true}` +
+        ` mentions=${mentionIds.join(',') || 'none'}` +
+        ` text="${content}"`
+      );
+    }
     return `type=${type} body_len=${rawBody.length} gateway_fwd=${forwarded} sig=${sig} ts=${ts}`;
   } catch {
     return `type=unparsed body_len=${rawBody.length} gateway_fwd=${forwarded} sig=${sig} ts=${ts}`;
@@ -130,14 +153,59 @@ export function discordSummarize(
 }
 
 /**
- * PING / slash / buttons must return Chat SDK's body (PONG or DEFERRED).
- * Gateway-forwarded MESSAGE_CREATE posts can ack first — the agent run is slow.
+ * PING / slash must return Chat SDK's body (PONG or DEFERRED).
+ * Gateway-forwarded MESSAGE_CREATE acks first — the agent run continues after 200.
  */
 export function discordRespond(
   _rawBody: string,
   request: { headers: { get(name: string): string | null } },
 ): 'sdk' | 'ack' {
   return request.headers.get('x-discord-gateway-token') ? 'ack' : 'sdk';
+}
+
+export function discordPrepare(
+  rawBody: string,
+  headers: Headers,
+  env: Record<string, string | undefined>,
+): { rawBody: string; headers?: Headers } {
+  let body = rawBody;
+  const next = new Headers(headers);
+  try {
+    const parsed = JSON.parse(rawBody) as {
+      type?: unknown;
+      data?: {
+        mentions?: unknown;
+        attachments?: unknown;
+        mention_roles?: unknown;
+        author?: { id?: unknown; username?: unknown; bot?: unknown };
+        content?: unknown;
+        channel_id?: unknown;
+        guild_id?: unknown;
+      };
+    };
+    if (typeof parsed?.type !== 'string' || !parsed.type.startsWith('GATEWAY_')) {
+      return { rawBody: body };
+    }
+
+    if (parsed.type === 'GATEWAY_MESSAGE_CREATE' && parsed.data && typeof parsed.data === 'object') {
+      if (!Array.isArray(parsed.data.mentions)) parsed.data.mentions = [];
+      if (!Array.isArray(parsed.data.attachments)) parsed.data.attachments = [];
+      if (!Array.isArray(parsed.data.mention_roles)) parsed.data.mention_roles = [];
+      body = JSON.stringify(parsed);
+    }
+
+    if (!next.get('x-discord-gateway-token')) {
+      const token = normalizeSecret(env.DISCORD_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN);
+      if (token) {
+        next.set('x-discord-gateway-token', token);
+        logger.log(`injected gateway token for ${parsed.type}`);
+        return { rawBody: body, headers: next };
+      }
+    }
+    return body === rawBody ? { rawBody: body } : { rawBody: body, headers: next };
+  } catch {
+    return { rawBody };
+  }
 }
 
 export function assertDiscordEnv(env: Record<string, string | undefined>): Response | void {
@@ -183,4 +251,5 @@ export const discordAdapter = {
   assertEnv: assertDiscordEnv,
   summarize: discordSummarize,
   respond: discordRespond,
+  prepare: discordPrepare,
 };

@@ -3,8 +3,9 @@
  *
  * Vendor routes (e.g. POST /slack, POST /discord) call createVendorWebhook().
  * Slack events ack 200 and keep processing after return. Discord Interactions
- * return the Chat SDK response (PING PONG / slash DEFERRED) so Discord's
- * 3s window is met. Signature verification happens inside bot.webhooks.<adapter>.
+ * return the Chat SDK response (PING PONG / slash DEFERRED). Discord Gateway
+ * forwards ack 200 then keep processing, same as Slack. Signature verification
+ * happens inside bot.webhooks.<adapter>.
  */
 
 import type { CloudFunctionContext, EdgeoneRequest } from '@edgeone/types';
@@ -160,6 +161,7 @@ export type RunChatWebhookOptions = {
   handshake?: VendorAdapter['handshake'];
   summarize?: VendorAdapter['summarize'];
   respond?: VendorAdapter['respond'];
+  prepare?: VendorAdapter['prepare'];
 };
 
 export async function runChatWebhook(
@@ -176,7 +178,15 @@ export async function runChatWebhook(
     return jsonResponse({ status: 'error', message: 'missing request' }, 400);
   }
 
-  const rawBody = await readRawBody(request);
+  let rawBody = await readRawBody(request);
+  if (!rawBody && opts.adapter === 'discord' && request.body && typeof request.body === 'object') {
+    try {
+      rawBody = JSON.stringify(request.body);
+      logger.log('recovered discord webhook body from parsed object');
+    } catch {
+      /* keep empty */
+    }
+  }
   const incomingKind = bodyKind(request.body);
   logger.log(opts.summarize?.(rawBody, request) ?? `body_kind=${incomingKind} body_len=${rawBody.length}`);
 
@@ -189,7 +199,16 @@ export async function runChatWebhook(
   const envError = opts.assertEnv(context.env);
   if (envError) return envError;
 
-  const webRequest = toStandardRequest(request, rawBody);
+  let webRequest = toStandardRequest(request, rawBody);
+  if (opts.prepare) {
+    const prepared = opts.prepare(rawBody, webRequest.headers, context.env);
+    rawBody = prepared.rawBody;
+    webRequest = new Request(request.url, {
+      method: webRequest.method,
+      headers: prepared.headers ?? webRequest.headers,
+      body: rawBody,
+    });
+  }
   const origin = requestOrigin(request);
   const env = context.env;
   const respond: VendorRespond = opts.respond?.(rawBody, webRequest) ?? 'ack';
@@ -226,12 +245,15 @@ export async function runChatWebhook(
       if (!response.ok) {
         const detail = await response.clone().text().catch(() => '');
         logger.error(`chat webhook HTTP ${response.status}: ${detail.slice(0, 200)}`);
+      } else {
+        logger.log(`chat webhook HTTP ${response.status}`);
       }
       await Promise.allSettled(pending);
       logger.log(`[${tag}] process done: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms`);
       return response;
     } catch (e) {
-      logger.error(`unhandled ${tag} error:`, e);
+      const detail = e instanceof Error ? e.stack || e.message : String(e);
+      logger.error(`unhandled ${tag} error: ${detail}`);
       logger.log(`[${tag}] process done: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms`);
       if (!settled) fail(e);
       throw e;
@@ -268,6 +290,7 @@ export function createVendorWebhook(adapter: VendorAdapter) {
       handshake: adapter.handshake,
       summarize: adapter.summarize,
       respond: adapter.respond,
+      prepare: adapter.prepare,
     });
   };
 }

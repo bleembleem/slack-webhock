@@ -29,6 +29,12 @@ export type VendorAdapter = {
     rawBody: string,
     request: { headers: { get(name: string): string | null } },
   ) => VendorRespond;
+  /** Mutate raw body / headers before Chat SDK sees the request. */
+  prepare?: (
+    rawBody: string,
+    headers: Headers,
+    env: Record<string, string | undefined>,
+  ) => { rawBody: string; headers?: Headers };
 };
 
 export type ChatAdapters = {
