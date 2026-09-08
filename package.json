@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:agents": "PATH=$PWD/.venv/bin:$PATH edgeone makers dev",
+    "gateway": "node scripts/discord-gateway.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

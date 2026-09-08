@@ -145,7 +145,9 @@ async function runGatewayListener(opts: {
     if (packet.t === 'MESSAGE_CREATE' && (packet.d as { author?: { bot?: boolean } })?.author?.bot) {
       return;
     }
-    pending.push(forwardEvent(packet.t, packet.d));
+    // discord.js links member.user back to author while handling the packet,
+    // which makes it circular and unserializable. Snapshot before yielding.
+    pending.push(forwardEvent(packet.t, structuredClone(packet.d)));
   });
 
   client.on(Events.ClientReady, () => {
