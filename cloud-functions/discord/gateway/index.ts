@@ -4,17 +4,22 @@
  *
  * File path cloud-functions/discord/gateway/index.ts maps to **GET /discord/gateway**.
  *
- * Discord HTTP Interactions do not receive regular messages. This route
- * opens a Gateway WebSocket for `DISCORD_GATEWAY_DURATION_MS` and forwards
- * events to POST /discord.
+ * Discord HTTP Interactions do not receive regular messages. This route opens a
+ * Gateway WebSocket for `DISCORD_GATEWAY_DURATION_MS` and forwards events to
+ * POST /discord, which is where all the bot logic lives.
+ *
+ * The Chat SDK ships `startGatewayListener` for exactly this, but on this
+ * runtime it forwards READY and GUILD_CREATE and then stops delivering events,
+ * so @mentions never arrive. A plain discord.js client with the same intents
+ * works, so we run one here and send the payload shape POST /discord expects.
  *
  * Do not overlap two listeners. Discord allows ~1000 IDENTIFY (connect)
- * attempts per day; two discord.js clients fighting for one token reconnects
- * until Discord resets the bot token.
+ * attempts per day; two clients fighting for one token reconnect until Discord
+ * resets the bot token.
  *
  * Authorize with `Authorization: Bearer $DISCORD_GATEWAY_SECRET` (or CRON_SECRET).
  * Default: one shot. Append `?chain=1` to start the next listener only after
- * this one has disconnected.
+ * this one has disconnected. `?ms=` shortens the run for testing.
  */
 
 import type { CloudFunctionContext } from '@edgeone/types';
@@ -25,11 +30,26 @@ import {
   discordAdapter,
   discordGatewaySecret,
 } from '../../_adapters/discord';
-import { getChatBot } from '../../_bot';
 import { jsonResponse, requestOrigin } from '../../_process';
 import { createLogger } from '../../_logger';
 
 const logger = createLogger('discord-gateway');
+
+const GATEWAY_INTENTS = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.MessageContent,
+  GatewayIntentBits.DirectMessages,
+  GatewayIntentBits.GuildMessageReactions,
+  GatewayIntentBits.DirectMessageReactions,
+];
+
+/** Event types POST /discord acts on. Forwarding the rest is pure noise. */
+const FORWARDED_EVENTS = new Set([
+  'MESSAGE_CREATE',
+  'MESSAGE_REACTION_ADD',
+  'MESSAGE_REACTION_REMOVE',
+]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -40,175 +60,110 @@ function isAuthorized(authHeader: string | null, secret: string): boolean {
   return (authHeader ?? '').trim() === `Bearer ${secret}`;
 }
 
-function shouldChain(request: { url: string; headers: { get(name: string): string | null } }): boolean {
-  if (request.headers.get('x-discord-gateway-chain')?.trim() === '1') return true;
-  try {
-    const chain = new URL(request.url).searchParams.get('chain')?.trim();
-    if (chain === '1' || chain === 'true') return true;
-  } catch {
-    /* relative URL */
-  }
-  return false;
+function shouldChain(headers: Headers | null, query: URLSearchParams): boolean {
+  if (headers?.get('x-discord-gateway-chain')?.trim() === '1') return true;
+  const chain = query.get('chain')?.trim();
+  return chain === '1' || chain === 'true';
 }
 
-/**
- * `?diag=1` opens the Gateway directly and reports what the Cloud Function
- * actually observed. The Chat SDK swallows login/socket errors into logs we
- * cannot read from here, so this returns them in the HTTP body instead.
- */
-async function runDiagnostics(
-  botToken: string,
-  origin: string,
-  durationMs: number,
-  forward: boolean,
-): Promise<Response> {
-  const startedAt = Date.now();
-  const at = () => Date.now() - startedAt;
-  const events: string[] = [];
-  const packets: Record<string, number> = {};
-  let ready = '';
-
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-      GatewayIntentBits.DirectMessages,
-      GatewayIntentBits.GuildMessageReactions,
-      GatewayIntentBits.DirectMessageReactions,
-    ],
-    partials: [Partials.Channel],
-  });
-
-  client.on('raw', (packet: { t?: string | null; d?: unknown }) => {
-    if (!packet?.t) return;
-    packets[packet.t] = (packets[packet.t] ?? 0) + 1;
-    if (!forward || packet.t !== 'MESSAGE_CREATE') return;
-    // Same shape and headers the Chat SDK's forwardGatewayEvent sends.
-    void fetch(`${origin}/discord`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': botToken },
-      body: JSON.stringify({ type: 'GATEWAY_MESSAGE_CREATE', timestamp: Date.now(), data: packet.d }),
-    })
-      .then(async (res) => {
-        events.push(`${at()}ms forward -> HTTP ${res.status} ${(await res.text()).slice(0, 80)}`);
-      })
-      .catch((e) => events.push(`${at()}ms forward failed: ${String(e)}`));
-  });
-  client.on(Events.ClientReady, () => {
-    ready = `${at()}ms`;
-    events.push(`${at()}ms ready user=${client.user?.username ?? ''}`);
-  });
-  client.on(Events.Error, (e) => events.push(`${at()}ms error ${String(e)}`));
-  client.on(Events.ShardDisconnect, (event, id) =>
-    events.push(`${at()}ms shardDisconnect id=${id} code=${event?.code}`),
-  );
-  client.on(Events.ShardError, (e, id) => events.push(`${at()}ms shardError id=${id} ${String(e)}`));
-
-  let login = '';
-  let selfFetch = '';
-
-  try {
-    await client.login(botToken);
-    login = `resolved at ${at()}ms`;
-  } catch (e) {
-    login = `rejected at ${at()}ms: ${String(e)}`;
-  }
-
-  // Can the function call its own /discord route? Gateway forwarding depends on it.
-  try {
-    const probe = await fetch(`${origin}/discord`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'GATEWAY_TYPING_START', timestamp: Date.now(), data: {} }),
-    });
-    selfFetch = `HTTP ${probe.status}`;
-  } catch (e) {
-    selfFetch = `failed: ${String(e)}`;
-  }
-
-  await sleep(Math.max(0, durationMs - at()));
-
-  const wsStatus = String((client.ws as { status?: unknown } | undefined)?.status ?? 'unknown');
-  const ping = String((client.ws as { ping?: unknown } | undefined)?.ping ?? 'unknown');
-  client.destroy();
-
-  return jsonResponse({
-    status: 'diagnostics',
-    origin,
-    durationMs,
-    login,
-    ready: ready || 'never fired',
-    wsStatus,
-    ping,
-    selfFetch,
-    packets,
-    events: events.slice(0, 40),
-    hasWebSocket: typeof (globalThis as { WebSocket?: unknown }).WebSocket,
-    node: typeof process !== 'undefined' ? process.version : 'unknown',
-  });
-}
-
-type DiscordGatewayAdapter = {
-  startGatewayListener: (
-    options: { waitUntil?: (task: Promise<unknown>) => void },
-    durationMs?: number,
-    abortSignal?: AbortSignal,
-    webhookUrl?: string,
-  ) => Promise<Response>;
+type ListenerReport = {
+  ready: string;
+  packets: Record<string, number>;
+  forwarded: number;
+  problems: string[];
 };
 
 /**
- * `?trace=1` runs the real Chat SDK listener with `fetch` instrumented, so we
- * can see whether it ever attempts to POST the forwarded event to /discord.
+ * Messages posted inside a Discord thread carry the thread's channel id.
+ * `respondToChannelIds` is configured with parent channels, so resolve the
+ * parent and tag the payload the way the Chat SDK's adapter expects.
  */
-async function runSdkTrace(
-  discord: DiscordGatewayAdapter,
-  webhookUrl: string,
-  durationMs: number,
-): Promise<Response> {
+async function withThreadParent(
+  client: Client,
+  payload: unknown,
+  respondToChannelIds: string[],
+): Promise<unknown> {
+  const message = payload as { author?: { bot?: boolean }; channel_id?: string };
+  if (message.author?.bot || !message.channel_id) return payload;
+  if (respondToChannelIds.includes(message.channel_id)) return payload;
+
+  const channel = await client.channels.fetch(message.channel_id).catch(() => null);
+  if (channel?.isThread() && channel.parentId && respondToChannelIds.includes(channel.parentId)) {
+    return { ...message, thread: { id: channel.id, parent_id: channel.parentId } };
+  }
+  return payload;
+}
+
+async function runGatewayListener(opts: {
+  botToken: string;
+  webhookUrl: string;
+  durationMs: number;
+  respondToChannelIds: string[];
+}): Promise<ListenerReport> {
   const startedAt = Date.now();
   const at = () => Date.now() - startedAt;
-  const calls: string[] = [];
-  const originalFetch = globalThis.fetch;
+  const packets: Record<string, number> = {};
+  const problems: string[] = [];
+  const pending: Promise<void>[] = [];
+  let forwarded = 0;
+  let ready = 'never fired';
+  let shuttingDown = false;
 
-  globalThis.fetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
-    const method = init?.method ?? 'GET';
+  const client = new Client({ intents: GATEWAY_INTENTS, partials: [Partials.Channel] });
+
+  const forwardEvent = async (type: string, payload: unknown): Promise<void> => {
     try {
-      const res = await originalFetch(input, init);
-      if (calls.length < 60) calls.push(`${at()}ms ${method} ${url.slice(0, 100)} -> ${res.status}`);
-      return res;
+      const data =
+        type === 'MESSAGE_CREATE' && opts.respondToChannelIds.length > 0
+          ? await withThreadParent(client, payload, opts.respondToChannelIds)
+          : payload;
+      const response = await fetch(opts.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-discord-gateway-token': opts.botToken,
+        },
+        body: JSON.stringify({ type: `GATEWAY_${type}`, timestamp: Date.now(), data }),
+      });
+      if (response.ok) {
+        forwarded += 1;
+        return;
+      }
+      const detail = await response.text().catch(() => '');
+      problems.push(`${at()}ms ${type} HTTP ${response.status} ${detail.slice(0, 120)}`);
     } catch (e) {
-      if (calls.length < 60) calls.push(`${at()}ms ${method} ${url.slice(0, 100)} -> threw ${String(e)}`);
-      throw e;
+      problems.push(`${at()}ms ${type} ${String(e)}`);
     }
   };
 
-  let listenerTask: Promise<unknown> | undefined;
-  let listenerError = '';
+  client.on('raw', (packet: { t?: string | null; d?: unknown }) => {
+    if (shuttingDown || !packet?.t) return;
+    packets[packet.t] = (packets[packet.t] ?? 0) + 1;
+    if (!FORWARDED_EVENTS.has(packet.t)) return;
+    pending.push(forwardEvent(packet.t, packet.d));
+  });
+
+  client.on(Events.ClientReady, () => {
+    ready = `${at()}ms as ${client.user?.username ?? ''}`;
+  });
+  client.on(Events.Error, (e) => problems.push(`${at()}ms client ${String(e)}`));
+  client.on(Events.ShardError, (e, id) => problems.push(`${at()}ms shard ${id} ${String(e)}`));
+  client.on(Events.ShardDisconnect, (event, id) =>
+    problems.push(`${at()}ms shard ${id} disconnected code=${event?.code}`),
+  );
+
   try {
-    await discord.startGatewayListener(
-      { waitUntil: (task) => { listenerTask = Promise.resolve(task); } },
-      durationMs,
-      undefined,
-      webhookUrl,
-    );
-    if (listenerTask) await listenerTask;
+    await client.login(opts.botToken);
+    await sleep(Math.max(0, opts.durationMs - at()));
   } catch (e) {
-    listenerError = String(e);
+    problems.push(`${at()}ms login failed ${String(e)}`);
   } finally {
-    globalThis.fetch = originalFetch;
+    shuttingDown = true;
+    await Promise.allSettled(pending);
+    client.destroy();
   }
 
-  return jsonResponse({
-    status: 'sdk-trace',
-    webhookUrl,
-    durationMs,
-    elapsedMs: at(),
-    listenerError: listenerError || 'none',
-    fetchCalls: calls,
-  });
+  return { ready, packets, forwarded, problems: problems.slice(0, 20) };
 }
 
 async function onRequest(context: CloudFunctionContext): Promise<Response> {
@@ -218,7 +173,8 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
   }
 
   const env = context.env;
-  const secret = discordGatewaySecret(discordAdapter.resolveEnv(env));
+  const resolved = discordAdapter.resolveEnv(env);
+  const secret = discordGatewaySecret(resolved);
   if (!secret) {
     logger.error('DISCORD_GATEWAY_SECRET (or CRON_SECRET) is not configured');
     return jsonResponse({ status: 'error', message: 'discord gateway secret is not configured' }, 500);
@@ -236,70 +192,35 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
     return jsonResponse({ status: 'error', message: 'missing request origin' }, 500);
   }
 
-  const webhookUrl = `${origin}/discord`;
-  const durationMs = DISCORD_GATEWAY_DURATION_MS;
-
-  const query = (() => {
-    try {
-      return new URL(request.url).searchParams;
-    } catch {
-      return new URLSearchParams();
-    }
-  })();
-
-  const probeMs = Math.min(Number(query.get('ms')) || 60_000, durationMs);
-
-  if (query.get('diag') === '1') {
-    const botToken = discordAdapter.resolveEnv(env).DISCORD_BOT_TOKEN ?? '';
-    const forward = query.get('forward') === '1';
-    logger.log(`diagnostics durationMs=${probeMs} forward=${forward} origin=${origin}`);
-    return runDiagnostics(botToken, origin, probeMs, forward);
+  let query: URLSearchParams;
+  try {
+    query = new URL(request.url).searchParams;
+  } catch {
+    query = new URLSearchParams();
   }
 
-  const chain = shouldChain(request);
+  const durationMs = Math.min(
+    Number(query.get('ms')) || DISCORD_GATEWAY_DURATION_MS,
+    DISCORD_GATEWAY_DURATION_MS,
+  );
+  const webhookUrl = `${origin}/discord`;
+  const chain = shouldChain(request.headers as unknown as Headers, query);
   logger.log(`start durationMs=${durationMs} chain=${chain} webhook=${webhookUrl}`);
 
-  let discord: DiscordGatewayAdapter;
-  try {
-    const bot = getChatBot(env);
-    await bot.initialize();
-    discord = bot.getAdapter('discord') as DiscordGatewayAdapter;
-  } catch (e) {
-    logger.error('failed to initialize chat bot for gateway:', e);
-    return jsonResponse({ status: 'error', message: 'discord adapter is not registered' }, 500);
-  }
-
-  if (!discord || typeof discord.startGatewayListener !== 'function') {
-    logger.error('discord adapter missing startGatewayListener');
-    return jsonResponse({ status: 'error', message: 'discord adapter is not registered' }, 500);
-  }
-
-  if (query.get('trace') === '1') {
-    logger.log(`sdk trace durationMs=${probeMs} webhook=${webhookUrl}`);
-    return runSdkTrace(discord, webhookUrl, probeMs);
-  }
-
-  let listenerTask: Promise<unknown> | undefined;
-  const started = await discord.startGatewayListener(
-    {
-      waitUntil: (task) => {
-        listenerTask = Promise.resolve(task);
-      },
-    },
-    durationMs,
-    undefined,
+  const report = await runGatewayListener({
+    botToken: resolved.DISCORD_BOT_TOKEN ?? '',
     webhookUrl,
+    durationMs,
+    respondToChannelIds: (resolved.DISCORD_RESPOND_TO_CHANNEL_IDS ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean),
+  });
+
+  logger.log(
+    `listener finished ready=${report.ready} forwarded=${report.forwarded}` +
+      ` packets=${JSON.stringify(report.packets)} problems=${report.problems.length}`,
   );
-
-  if (listenerTask) {
-    try {
-      await listenerTask;
-    } catch (e) {
-      logger.error('discord gateway listener failed:', e);
-    }
-  }
-
-  logger.log('listener finished');
 
   if (chain) {
     await sleep(DISCORD_GATEWAY_RECONNECT_GAP_MS);
@@ -312,7 +233,7 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
     });
   }
 
-  return started;
+  return jsonResponse({ status: 'finished', durationMs, ...report });
 }
 
 export const onRequestGet = onRequest;
