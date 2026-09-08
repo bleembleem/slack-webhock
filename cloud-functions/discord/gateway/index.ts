@@ -140,6 +140,11 @@ async function runGatewayListener(opts: {
     if (shuttingDown || !packet?.t) return;
     packets[packet.t] = (packets[packet.t] ?? 0) + 1;
     if (!FORWARDED_EVENTS.has(packet.t)) return;
+    // Our own replies come back as MESSAGE_CREATE. The bot ignores them anyway,
+    // so dropping them here saves a POST /discord per reply.
+    if (packet.t === 'MESSAGE_CREATE' && (packet.d as { author?: { bot?: boolean } })?.author?.bot) {
+      return;
+    }
     pending.push(forwardEvent(packet.t, packet.d));
   });
 
