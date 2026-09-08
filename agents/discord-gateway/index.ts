@@ -220,6 +220,21 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   }
 
   const query = request.query ?? {};
+
+  // How long does this runtime actually let a task run? The listener only
+  // chains after its window ends, so a run killed early never re-arms. Measure
+  // it without touching Discord, so this costs no IDENTIFY and cannot collide
+  // with a listener that is already connected.
+  if (query.probe === '1' || query.probe === 1) {
+    const probeMs = Math.max(0, Number(query.ms) || 60_000);
+    const probeStart = Date.now();
+    logger.log(`probe requested ${probeMs}ms`);
+    await sleep(probeMs);
+    const elapsedMs = Date.now() - probeStart;
+    logger.log(`probe survived ${elapsedMs}ms`);
+    return jsonResponse({ status: 'probe', requestedMs: probeMs, elapsedMs });
+  }
+
   const requestedMs = Number(query.ms);
   const durationMs = Math.min(
     Number.isFinite(requestedMs) && requestedMs > 0 ? requestedMs : GATEWAY_DURATION_MS,
@@ -246,20 +261,39 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       ` packets=${JSON.stringify(report.packets)} problems=${report.problems.length}`,
   );
 
+  let chained = 'skipped';
   if (chain) {
     await sleep(RECONNECT_GAP_MS);
-    void fetch(`${origin}/discord-gateway?chain=1`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-        // A fresh id each window, so the next run is never queued behind this
-        // one on the same conversation.
-        'makers-conversation-id': `gw-${Date.now()}`,
-      },
-      body: '{}',
-    }).catch((e) => logger.error('failed to chain discord gateway listener:', e));
+    // The next window runs far longer than we can wait for, so give the
+    // request just long enough to be accepted and then let go. Returning
+    // without awaiting at all risks the runtime dropping it in flight.
+    const detach = new AbortController();
+    const timer = setTimeout(() => detach.abort(), 5_000);
+    try {
+      const response = await fetch(`${origin}/discord-gateway?chain=1`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${secret}`,
+          'Content-Type': 'application/json',
+          // A fresh id each window, so the next run is never queued behind
+          // this one on the same conversation.
+          'makers-conversation-id': `gw-${Date.now()}`,
+        },
+        body: '{}',
+        signal: detach.signal,
+      });
+      chained = `HTTP ${response.status}`;
+    } catch (e) {
+      // Letting go once the next run is under way is the expected path.
+      chained = (e as Error)?.name === 'AbortError' ? 'dispatched' : `failed: ${String(e)}`;
+      if (!chained.startsWith('dispatched')) {
+        logger.error('failed to chain discord gateway listener:', e);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    logger.log(`chain ${chained}`);
   }
 
-  return jsonResponse({ status: 'finished', durationMs, elapsedMs, chain, ...report });
+  return jsonResponse({ status: 'finished', durationMs, elapsedMs, chain, chained, ...report });
 }
