@@ -18,6 +18,7 @@
  */
 
 import type { CloudFunctionContext } from '@edgeone/types';
+import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import {
   DISCORD_GATEWAY_DURATION_MS,
   DISCORD_GATEWAY_RECONNECT_GAP_MS,
@@ -48,6 +49,92 @@ function shouldChain(request: { url: string; headers: { get(name: string): strin
     /* relative URL */
   }
   return false;
+}
+
+/**
+ * `?diag=1` opens the Gateway directly and reports what the Cloud Function
+ * actually observed. The Chat SDK swallows login/socket errors into logs we
+ * cannot read from here, so this returns them in the HTTP body instead.
+ */
+async function runDiagnostics(
+  botToken: string,
+  origin: string,
+  durationMs: number,
+): Promise<Response> {
+  const startedAt = Date.now();
+  const at = () => Date.now() - startedAt;
+  const events: string[] = [];
+  const packets: Record<string, number> = {};
+  let ready = '';
+
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.DirectMessageReactions,
+    ],
+    partials: [Partials.Channel],
+  });
+
+  client.on('raw', (packet: { t?: string | null }) => {
+    if (!packet?.t) return;
+    packets[packet.t] = (packets[packet.t] ?? 0) + 1;
+  });
+  client.on(Events.ClientReady, () => {
+    ready = `${at()}ms`;
+    events.push(`${at()}ms ready user=${client.user?.username ?? ''}`);
+  });
+  client.on(Events.Error, (e) => events.push(`${at()}ms error ${String(e)}`));
+  client.on(Events.ShardDisconnect, (event, id) =>
+    events.push(`${at()}ms shardDisconnect id=${id} code=${event?.code}`),
+  );
+  client.on(Events.ShardError, (e, id) => events.push(`${at()}ms shardError id=${id} ${String(e)}`));
+
+  let login = '';
+  let selfFetch = '';
+
+  try {
+    await client.login(botToken);
+    login = `resolved at ${at()}ms`;
+  } catch (e) {
+    login = `rejected at ${at()}ms: ${String(e)}`;
+  }
+
+  // Can the function call its own /discord route? Gateway forwarding depends on it.
+  try {
+    const probe = await fetch(`${origin}/discord`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'GATEWAY_TYPING_START', timestamp: Date.now(), data: {} }),
+    });
+    selfFetch = `HTTP ${probe.status}`;
+  } catch (e) {
+    selfFetch = `failed: ${String(e)}`;
+  }
+
+  await sleep(Math.max(0, durationMs - at()));
+
+  const wsStatus = String((client.ws as { status?: unknown } | undefined)?.status ?? 'unknown');
+  const ping = String((client.ws as { ping?: unknown } | undefined)?.ping ?? 'unknown');
+  client.destroy();
+
+  return jsonResponse({
+    status: 'diagnostics',
+    origin,
+    durationMs,
+    login,
+    ready: ready || 'never fired',
+    wsStatus,
+    ping,
+    selfFetch,
+    packets,
+    events: events.slice(0, 40),
+    hasWebSocket: typeof (globalThis as { WebSocket?: unknown }).WebSocket,
+    node: typeof process !== 'undefined' ? process.version : 'unknown',
+  });
 }
 
 type DiscordGatewayAdapter = {
@@ -86,6 +173,22 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
 
   const webhookUrl = `${origin}/discord`;
   const durationMs = DISCORD_GATEWAY_DURATION_MS;
+
+  const query = (() => {
+    try {
+      return new URL(request.url).searchParams;
+    } catch {
+      return new URLSearchParams();
+    }
+  })();
+
+  if (query.get('diag') === '1') {
+    const botToken = discordAdapter.resolveEnv(env).DISCORD_BOT_TOKEN ?? '';
+    const diagMs = Math.min(Number(query.get('ms')) || 60_000, durationMs);
+    logger.log(`diagnostics durationMs=${diagMs} origin=${origin}`);
+    return runDiagnostics(botToken, origin, diagMs);
+  }
+
   const chain = shouldChain(request);
   logger.log(`start durationMs=${durationMs} chain=${chain} webhook=${webhookUrl}`);
 
