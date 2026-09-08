@@ -21,6 +21,11 @@
  * Authorize with `Authorization: Bearer $DISCORD_GATEWAY_SECRET` (or CRON_SECRET).
  * Default: one shot. `?chain=1` starts the next window once this socket closes.
  * `?ms=` shortens the run for testing.
+ *
+ * `context.request.signal` aborts on client disconnect as well as run timeout,
+ * and this has to outlive whatever kicked it off, so the window is not tied to
+ * it. To stop a chain, rotate DISCORD_GATEWAY_SECRET: the next hop gets a 401
+ * and the chain ends within one window.
  */
 
 import type { AgentContext } from '@edgeone/types';
@@ -56,18 +61,8 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function clean(value: string | undefined): string {
@@ -124,7 +119,6 @@ async function runGatewayListener(opts: {
   webhookUrl: string;
   durationMs: number;
   respondToChannelIds: string[];
-  signal?: AbortSignal;
 }): Promise<ListenerReport> {
   const startedAt = Date.now();
   const at = () => Date.now() - startedAt;
@@ -187,7 +181,7 @@ async function runGatewayListener(opts: {
 
   try {
     await client.login(opts.botToken);
-    await sleep(Math.max(0, opts.durationMs - at()), opts.signal);
+    await sleep(Math.max(0, opts.durationMs - at()));
   } catch (e) {
     problems.push(`${at()}ms login failed ${String(e)}`);
   } finally {
@@ -244,7 +238,6 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       .split(',')
       .map((part) => part.trim())
       .filter(Boolean),
-    signal: request.signal,
   });
   const elapsedMs = Date.now() - startedAt;
 
