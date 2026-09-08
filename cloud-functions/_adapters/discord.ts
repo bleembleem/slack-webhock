@@ -31,7 +31,8 @@ export type DiscordEnv = {
 
 /** Stay under Cloud Functions maxDuration (120s) with room for login/teardown. */
 export const DISCORD_GATEWAY_DURATION_MS = 105_000;
-export const DISCORD_GATEWAY_OVERLAP_MS = 15_000;
+/** Pause after destroy so Discord can drop the session before the next IDENTIFY. */
+export const DISCORD_GATEWAY_RECONNECT_GAP_MS = 2_000;
 
 function normalizeSecret(value: string | undefined): string {
   return (value ?? '').trim().replace(/^['"]|['"]$/g, '');

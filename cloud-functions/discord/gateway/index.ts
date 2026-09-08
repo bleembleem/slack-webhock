@@ -5,17 +5,22 @@
  * File path cloud-functions/discord/gateway/index.ts maps to **GET /discord/gateway**.
  *
  * Discord HTTP Interactions do not receive regular messages. This route
- * opens a Gateway WebSocket for `DISCORD_GATEWAY_DURATION_MS`, forwards
- * events to POST /discord, then self-chains so coverage continues.
+ * opens a Gateway WebSocket for `DISCORD_GATEWAY_DURATION_MS` and forwards
+ * events to POST /discord.
+ *
+ * Do not overlap two listeners. Discord allows ~1000 IDENTIFY (connect)
+ * attempts per day; two discord.js clients fighting for one token reconnects
+ * until Discord resets the bot token.
  *
  * Authorize with `Authorization: Bearer $DISCORD_GATEWAY_SECRET` (or CRON_SECRET).
- * Append `?once=1` to skip chaining. Hit this URL once after deploy to start.
+ * Default: one shot. Append `?chain=1` to start the next listener only after
+ * this one has disconnected.
  */
 
 import type { CloudFunctionContext } from '@edgeone/types';
 import {
   DISCORD_GATEWAY_DURATION_MS,
-  DISCORD_GATEWAY_OVERLAP_MS,
+  DISCORD_GATEWAY_RECONNECT_GAP_MS,
   discordAdapter,
   discordGatewaySecret,
 } from '../../_adapters/discord';
@@ -35,14 +40,14 @@ function isAuthorized(authHeader: string | null, secret: string): boolean {
 }
 
 function shouldChain(request: { url: string; headers: { get(name: string): string | null } }): boolean {
-  if (request.headers.get('x-discord-gateway-once')?.trim() === '1') return false;
+  if (request.headers.get('x-discord-gateway-chain')?.trim() === '1') return true;
   try {
-    const once = new URL(request.url).searchParams.get('once')?.trim();
-    if (once === '1' || once === 'true') return false;
+    const chain = new URL(request.url).searchParams.get('chain')?.trim();
+    if (chain === '1' || chain === 'true') return true;
   } catch {
     /* relative URL */
   }
-  return true;
+  return false;
 }
 
 type DiscordGatewayAdapter = {
@@ -81,7 +86,8 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
 
   const webhookUrl = `${origin}/discord`;
   const durationMs = DISCORD_GATEWAY_DURATION_MS;
-  logger.log(`start durationMs=${durationMs} webhook=${webhookUrl}`);
+  const chain = shouldChain(request);
+  logger.log(`start durationMs=${durationMs} chain=${chain} webhook=${webhookUrl}`);
 
   let discord: DiscordGatewayAdapter;
   try {
@@ -110,19 +116,6 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
     webhookUrl,
   );
 
-  if (shouldChain(request) && DISCORD_GATEWAY_OVERLAP_MS < durationMs) {
-    const nextUrl = `${origin}/discord/gateway`;
-    void (async () => {
-      await sleep(durationMs - DISCORD_GATEWAY_OVERLAP_MS);
-      void fetch(nextUrl, {
-        method: 'GET',
-        headers: { authorization: `Bearer ${secret}` },
-      }).catch((e) => {
-        logger.error('failed to chain discord gateway listener:', e);
-      });
-    })();
-  }
-
   if (listenerTask) {
     try {
       await listenerTask;
@@ -132,6 +125,18 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
   }
 
   logger.log('listener finished');
+
+  if (chain) {
+    await sleep(DISCORD_GATEWAY_RECONNECT_GAP_MS);
+    const nextUrl = `${origin}/discord/gateway?chain=1`;
+    void fetch(nextUrl, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${secret}` },
+    }).catch((e) => {
+      logger.error('failed to chain discord gateway listener:', e);
+    });
+  }
+
   return started;
 }
 
