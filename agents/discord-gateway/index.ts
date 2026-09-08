@@ -257,7 +257,13 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     await sleep(RECONNECT_GAP_MS);
     void fetch(`${origin}/discord-gateway?chain=1`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+        // A fresh id each window, so the next run is never queued behind this
+        // one on the same conversation.
+        'makers-conversation-id': `gw-${Date.now()}`,
+      },
       body: '{}',
     }).catch((e) => logger.error('failed to chain discord gateway listener:', e));
   }
