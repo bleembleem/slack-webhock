@@ -10,10 +10,10 @@
  * there; this is a pipe, nothing more.
  *
  * It lives in the Agents runtime rather than a Cloud Function because
- * `cloudFunctions.maxDuration` caps at 120s while `agents.timeout` allows 1800s.
+ * `cloudFunctions.maxDuration` caps at 120s while this runtime allows 600s.
  * That matters: Discord resets a bot token that connects more than ~1000 times
- * a day, and 120s windows would need ~800 reconnects a day. 29-minute windows
- * need about 48.
+ * a day, and 120s windows would need ~800 reconnects a day. 9-minute windows
+ * need about 160, which is what the Chat SDK's own serverless guide budgets.
  *
  * Never run two listeners on one token at once — they reconnect against each
  * other until Discord resets the token.
@@ -34,8 +34,13 @@ import { createLogger } from '../_logger';
 
 const logger = createLogger('discord-gateway');
 
-/** Stay under `agents.timeout` (1800s) with room for login and teardown. */
-const GATEWAY_DURATION_MS = 1_740_000;
+/**
+ * The runtime kills an invocation at 600s with a 502 no matter what
+ * `agents.timeout` says (measured with `?probe=1`). A window that overruns
+ * never reaches the chain call below, so it would end the chain instead of
+ * extending it. 9 minutes leaves room for login, teardown and handing off.
+ */
+const GATEWAY_DURATION_MS = 540_000;
 /** Let Discord drop the old session before the next IDENTIFY. */
 const RECONNECT_GAP_MS = 2_000;
 
