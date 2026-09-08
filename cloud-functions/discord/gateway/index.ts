@@ -60,6 +60,7 @@ async function runDiagnostics(
   botToken: string,
   origin: string,
   durationMs: number,
+  forward: boolean,
 ): Promise<Response> {
   const startedAt = Date.now();
   const at = () => Date.now() - startedAt;
@@ -79,9 +80,20 @@ async function runDiagnostics(
     partials: [Partials.Channel],
   });
 
-  client.on('raw', (packet: { t?: string | null }) => {
+  client.on('raw', (packet: { t?: string | null; d?: unknown }) => {
     if (!packet?.t) return;
     packets[packet.t] = (packets[packet.t] ?? 0) + 1;
+    if (!forward || packet.t !== 'MESSAGE_CREATE') return;
+    // Same shape and headers the Chat SDK's forwardGatewayEvent sends.
+    void fetch(`${origin}/discord`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': botToken },
+      body: JSON.stringify({ type: 'GATEWAY_MESSAGE_CREATE', timestamp: Date.now(), data: packet.d }),
+    })
+      .then(async (res) => {
+        events.push(`${at()}ms forward -> HTTP ${res.status} ${(await res.text()).slice(0, 80)}`);
+      })
+      .catch((e) => events.push(`${at()}ms forward failed: ${String(e)}`));
   });
   client.on(Events.ClientReady, () => {
     ready = `${at()}ms`;
@@ -146,6 +158,59 @@ type DiscordGatewayAdapter = {
   ) => Promise<Response>;
 };
 
+/**
+ * `?trace=1` runs the real Chat SDK listener with `fetch` instrumented, so we
+ * can see whether it ever attempts to POST the forwarded event to /discord.
+ */
+async function runSdkTrace(
+  discord: DiscordGatewayAdapter,
+  webhookUrl: string,
+  durationMs: number,
+): Promise<Response> {
+  const startedAt = Date.now();
+  const at = () => Date.now() - startedAt;
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
+    const method = init?.method ?? 'GET';
+    try {
+      const res = await originalFetch(input, init);
+      if (calls.length < 60) calls.push(`${at()}ms ${method} ${url.slice(0, 100)} -> ${res.status}`);
+      return res;
+    } catch (e) {
+      if (calls.length < 60) calls.push(`${at()}ms ${method} ${url.slice(0, 100)} -> threw ${String(e)}`);
+      throw e;
+    }
+  };
+
+  let listenerTask: Promise<unknown> | undefined;
+  let listenerError = '';
+  try {
+    await discord.startGatewayListener(
+      { waitUntil: (task) => { listenerTask = Promise.resolve(task); } },
+      durationMs,
+      undefined,
+      webhookUrl,
+    );
+    if (listenerTask) await listenerTask;
+  } catch (e) {
+    listenerError = String(e);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  return jsonResponse({
+    status: 'sdk-trace',
+    webhookUrl,
+    durationMs,
+    elapsedMs: at(),
+    listenerError: listenerError || 'none',
+    fetchCalls: calls,
+  });
+}
+
 async function onRequest(context: CloudFunctionContext): Promise<Response> {
   const request = context.request;
   if (!request) {
@@ -182,11 +247,13 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
     }
   })();
 
+  const probeMs = Math.min(Number(query.get('ms')) || 60_000, durationMs);
+
   if (query.get('diag') === '1') {
     const botToken = discordAdapter.resolveEnv(env).DISCORD_BOT_TOKEN ?? '';
-    const diagMs = Math.min(Number(query.get('ms')) || 60_000, durationMs);
-    logger.log(`diagnostics durationMs=${diagMs} origin=${origin}`);
-    return runDiagnostics(botToken, origin, diagMs);
+    const forward = query.get('forward') === '1';
+    logger.log(`diagnostics durationMs=${probeMs} forward=${forward} origin=${origin}`);
+    return runDiagnostics(botToken, origin, probeMs, forward);
   }
 
   const chain = shouldChain(request);
@@ -205,6 +272,11 @@ async function onRequest(context: CloudFunctionContext): Promise<Response> {
   if (!discord || typeof discord.startGatewayListener !== 'function') {
     logger.error('discord adapter missing startGatewayListener');
     return jsonResponse({ status: 'error', message: 'discord adapter is not registered' }, 500);
+  }
+
+  if (query.get('trace') === '1') {
+    logger.log(`sdk trace durationMs=${probeMs} webhook=${webhookUrl}`);
+    return runSdkTrace(discord, webhookUrl, probeMs);
   }
 
   let listenerTask: Promise<unknown> | undefined;
