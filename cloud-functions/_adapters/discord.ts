@@ -7,10 +7,10 @@
  *   DISCORD_APPLICATION_ID    Application ID (General Information)
  *   DISCORD_MENTION_ROLE_IDS  Optional comma-separated role IDs
  *   DISCORD_RESPOND_TO_CHANNEL_IDS  Optional parent channel IDs (no @mention)
- *   DISCORD_GATEWAY_SECRET    Bearer secret for GET /discord/gateway (or CRON_SECRET)
+ *   DISCORD_GATEWAY_SECRET    Bearer secret for POST /discord-gateway (or CRON_SECRET)
  *
  * HTTP Interactions (PING, slash, buttons) POST to /discord and must return
- * the Chat SDK response. Regular messages need GET /discord/gateway.
+ * the Chat SDK response. Regular messages need POST /discord-gateway.
  */
 
 import { createDiscordAdapter } from '@chat-adapter/discord';
@@ -112,6 +112,37 @@ export function createDiscordChatAdapter(env: DiscordEnv) {
 
 export function discordGatewaySecret(env: DiscordEnv): string {
   return normalizeSecret(env.DISCORD_GATEWAY_SECRET) || normalizeSecret(env.CRON_SECRET);
+}
+
+/**
+ * The adapter opens a Discord thread for every mention before our handlers run
+ * and offers no way to turn that off. We answer in the channel, so that thread
+ * stays empty — delete it instead of littering the channel. Needs Manage Threads.
+ *
+ * Chat SDK thread ids are `discord:guildId:channelId[:threadId]`.
+ */
+export async function discordDeleteEmptyThread(env: DiscordEnv, chatThreadId: string): Promise<void> {
+  const parts = chatThreadId.split(':');
+  const discordThreadId = parts.length >= 4 ? parts[3] : '';
+  if (!discordThreadId) return;
+
+  const botToken = normalizeSecret(env.DISCORD_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN);
+  if (!botToken) return;
+
+  try {
+    const response = await fetch(`https://discord.com/api/v10/channels/${discordThreadId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bot ${botToken}` },
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      logger.error(
+        `failed to delete empty thread ${discordThreadId}: HTTP ${response.status} ${detail.slice(0, 120)}`,
+      );
+    }
+  } catch (e) {
+    logger.error(`failed to delete empty thread ${discordThreadId}: ${String(e)}`);
+  }
 }
 
 export function discordSummarize(

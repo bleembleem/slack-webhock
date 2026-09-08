@@ -10,7 +10,8 @@
  * Run it somewhere that stays up:
  *   npm run gateway
  *
- * Prefer this over GET /discord/gateway. Cloud Functions cap out at 120s, so
+ * The deployed POST /discord-gateway agent is the primary listener; this is a
+ * local fallback. Cloud Functions cap out at 120s, so
  * keeping a listener alive there means reconnecting ~800 times a day, and
  * Discord resets a bot token that connects more than ~1000 times a day.
  * One long-lived connection reconnects a handful of times instead.

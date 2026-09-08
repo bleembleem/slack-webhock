@@ -5,13 +5,13 @@
  * Register vendors in `_adapters/` (add `<name>.ts` and wire it in
  * `_adapters/index.ts`). Vendor routes (POST /slack, POST /discord, …)
  * dispatch through `_process.ts`. Slack acks immediately; Discord Interactions
- * return Chat SDK's PONG/DEFERRED. Regular Discord messages need GET /discord/gateway.
+ * return Chat SDK's PONG/DEFERRED. Regular Discord messages need POST /discord-gateway.
  *
  * Add a vendor:
  *   1. package.json: @chat-adapter/<name>
  *   2. cloud-functions/_adapters/<name>.ts and wire create / resolveEnv / fingerprint
  *   3. cloud-functions/<name>/index.ts with createVendorWebhook
- *   Discord also needs cloud-functions/discord/gateway (Gateway WebSocket).
+ *   Discord also needs agents/discord-gateway (Gateway WebSocket).
  *
  * Memory state adapter keeps subscriptions/locks in-process (lost on restart).
  * /chat already emits SSE text_delta; we adapt that iterable into post().
@@ -28,6 +28,7 @@ import {
   type BotEnv,
   type ChatAdapters,
 } from './_adapters';
+import { discordDeleteEmptyThread } from './_adapters/discord';
 import { createLogger } from './_logger';
 
 const logger = createLogger('chat-bot');
@@ -227,7 +228,12 @@ async function streamToChannel(opts: {
   }
 }
 
-async function replyToThread(thread: Thread, message: Message, source: string): Promise<void> {
+async function replyToThread(
+  env: BotEnv,
+  thread: Thread,
+  message: Message,
+  source: string,
+): Promise<void> {
   if (message.author.isMe || message.author.isBot === true) {
     logger.log(
       `skip ${source} thread=${thread.id} isMe=${message.author.isMe} isBot=${message.author.isBot}`,
@@ -235,12 +241,19 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
     return;
   }
 
+  // Discord opens a throwaway thread for every mention, so answering in it
+  // would isolate each question in its own conversation and clutter the
+  // channel. Slack threads are started by people and worth replying inside.
+  const platform = platformFromThreadId(thread.id);
+  const inChannel = platform === 'discord';
+  if (inChannel) await discordDeleteEmptyThread(env, thread.id);
+
   await streamToChannel({
-    post: (text) => thread.channel.post(text),
+    post: (text) => (inChannel ? thread.channel.post(text) : thread.post(text)),
     text: message.text.trim() || '(The user sent a message with no text.)',
-    platform: platformFromThreadId(thread.id),
+    platform,
     userId: message.author.userId,
-    conversationId: thread.id,
+    conversationId: inChannel ? thread.channel.id : thread.id,
     signal: thread.signal,
     source,
   });
@@ -260,11 +273,11 @@ function createBot(env: BotEnv): ChatBot {
   });
 
   chat.onNewMention(async (thread, message) => {
-    await replyToThread(thread, message, 'onNewMention');
+    await replyToThread(env, thread, message, 'onNewMention');
   });
 
   chat.onDirectMessage(async (thread, message) => {
-    await replyToThread(thread, message, 'onDirectMessage');
+    await replyToThread(env, thread, message, 'onDirectMessage');
   });
 
   chat.onSlashCommand(async (event) => {
