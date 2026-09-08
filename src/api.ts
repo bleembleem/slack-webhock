@@ -4,6 +4,7 @@
  * Route mapping (file → route):
  *   agents/chat/index.ts                         → POST /chat                  Main chat endpoint (SSE)
  *   agents/stop/index.ts                         → POST /stop                  Abort the active agent run
+ *   agents/discord-gateway/index.ts              → POST /discord-gateway       Discord Gateway listener (29 min per window)
  *   cloud-functions/history/index.ts             → POST /history               Get conversation history
  *   cloud-functions/conversations/index.ts       → POST /conversations         List conversations for a user
  *   cloud-functions/clear-history/index.ts       → POST /clear-history         Clear messages of one conversation

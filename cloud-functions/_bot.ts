@@ -236,7 +236,7 @@ async function replyToThread(thread: Thread, message: Message, source: string): 
   }
 
   await streamToChannel({
-    post: (text) => thread.post(text),
+    post: (text) => thread.channel.post(text),
     text: message.text.trim() || '(The user sent a message with no text.)',
     platform: platformFromThreadId(thread.id),
     userId: message.author.userId,
