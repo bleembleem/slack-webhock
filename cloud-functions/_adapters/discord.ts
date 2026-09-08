@@ -120,11 +120,25 @@ export function discordGatewaySecret(env: DiscordEnv): string {
  * stays empty — delete it instead of littering the channel. Needs Manage Threads.
  *
  * Chat SDK thread ids are `discord:guildId:channelId[:threadId]`.
+ *
+ * `sourceChannelId` is where the incoming message was actually posted. The
+ * adapter only opens a thread when that is the parent channel; when a message
+ * arrives inside a thread, the thread belongs to whoever opened it and must be
+ * left alone. Anything we cannot place is left alone too.
  */
-export async function discordDeleteEmptyThread(env: DiscordEnv, chatThreadId: string): Promise<void> {
+export async function discordDeleteEmptyThread(
+  env: DiscordEnv,
+  chatThreadId: string,
+  sourceChannelId: string | undefined,
+): Promise<void> {
   const parts = chatThreadId.split(':');
+  const parentChannelId = parts[2] ?? '';
   const discordThreadId = parts.length >= 4 ? parts[3] : '';
   if (!discordThreadId) return;
+  if (!sourceChannelId || sourceChannelId !== parentChannelId) {
+    logger.log(`keeping thread ${discordThreadId}: message came from ${sourceChannelId ?? 'unknown'}`);
+    return;
+  }
 
   const botToken = normalizeSecret(env.DISCORD_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN);
   if (!botToken) return;

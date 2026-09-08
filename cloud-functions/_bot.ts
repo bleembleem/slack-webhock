@@ -246,7 +246,10 @@ async function replyToThread(
   // channel. Slack threads are started by people and worth replying inside.
   const platform = platformFromThreadId(thread.id);
   const inChannel = platform === 'discord';
-  if (inChannel) await discordDeleteEmptyThread(env, thread.id);
+  if (inChannel) {
+    const raw = message.raw as { channel_id?: string } | undefined;
+    await discordDeleteEmptyThread(env, thread.id, raw?.channel_id);
+  }
 
   await streamToChannel({
     post: (text) => (inChannel ? thread.channel.post(text) : thread.post(text)),
