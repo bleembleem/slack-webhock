@@ -24,9 +24,10 @@ export type BotEnv = SlackEnv & DiscordEnv & CallbackEnv;
 export type VendorRespond = 'sdk' | 'ack';
 
 /**
- * Where a reply belongs. Most platforms thread under the message that started
- * the conversation; Discord instead opens a throwaway thread for every mention,
- * which would bury each question in its own conversation.
+ * Where a reply belongs. `channel` keeps one conversation per channel, which is
+ * also what the agent conversation id is keyed on, and is what Discord needs
+ * anyway because it opens a throwaway thread for every mention. `thread` is for
+ * platforms where burying the answer in a thread is the expected behaviour.
  */
 export type ReplySurface = 'thread' | 'channel';
 

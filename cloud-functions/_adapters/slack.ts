@@ -136,4 +136,5 @@ export const slackAdapter = {
   assertEnv: assertSlackEnv,
   handshake: slackHandshake,
   summarize: slackSummarize,
+  replySurface: 'channel' as const,
 };
