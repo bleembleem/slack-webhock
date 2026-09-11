@@ -4,7 +4,8 @@
  * Route mapping (file → route):
  *   agents/chat/index.ts                         → POST /chat                  Main chat endpoint (SSE)
  *   agents/stop/index.ts                         → POST /stop                  Abort the active agent run
- *   agents/discord-gateway/index.ts              → POST /discord-gateway       Discord Gateway listener (9 min per window)
+ *   agents/discord-gateway/index.ts              → POST /discord-gateway       Discord Gateway listener (9.5 min per window)
+ *   cloud-functions/gateway-tick/index.ts        → POST /gateway-tick          Cron target that re-arms the Gateway every 10 min
  *   cloud-functions/chat-callback/index.ts       → POST /chat-callback         Agent posts its answer back here (bearer auth)
  *   cloud-functions/history/index.ts             → POST /history               Get conversation history
  *   cloud-functions/conversations/index.ts       → POST /conversations         List conversations for a user

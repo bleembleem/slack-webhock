@@ -8,6 +8,15 @@
       "externalNodeModules": ["discord.js"]
     }
   },
+  "schedules": [
+    {
+      "name": "discord-gateway",
+      "cron": "*/10 * * * *",
+      "timezone": "Asia/Shanghai",
+      "method": "POST",
+      "path": "/gateway-tick"
+    }
+  ],
   "agents": {
     "timeout": 600,
     "framework": "openai-agents-sdk",
