@@ -25,6 +25,56 @@ import { sseResponse } from '../_sse';
 const logger = createLogger('chat');
 const DEFAULT_MODEL = '@makers/deepseek-v4-flash';
 
+/**
+ * Where to report back to when the caller is not waiting for the response.
+ * `target` is opaque here — only the callback route knows how to deliver it.
+ */
+type AgentCallback = { url: string; token: string; target: unknown };
+
+function parseCallback(value: unknown): AgentCallback | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { url, token, target } = value as Record<string, unknown>;
+  if (typeof url !== 'string' || !url) return undefined;
+  if (typeof token !== 'string' || !token) return undefined;
+  return { url, token, target };
+}
+
+/**
+ * Callback mode: the IM webhook that started this run has already returned, so
+ * there is nobody to stream to and `context.request.signal` fires the moment it
+ * drops the connection. Run to completion without that signal, then report.
+ *
+ * The runtime still kills an invocation at 600s. Past that the callback never
+ * fires and the placeholder is left saying "Thinking…".
+ */
+async function runWithCallback(
+  agent: Agent,
+  message: string,
+  session: Session | undefined,
+  callback: AgentCallback,
+): Promise<Response> {
+  const result = await run(agent, message, { session });
+  const text = String(result.finalOutput ?? '').trim();
+  logger.log(`[callback] POST ${callback.url} len=${text.length}`);
+
+  const res = await fetch(callback.url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${callback.token}`,
+    },
+    body: JSON.stringify({ target: callback.target, text }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`chat-callback HTTP ${res.status}: ${detail.slice(0, 200)}`);
+  }
+
+  return new Response(JSON.stringify({ status: 'ok' }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 export async function onRequest(context: AgentContext) {
   const body = (context.request.body ?? {}) as Record<string, any>;
   const message = body.message as string | undefined;
@@ -44,6 +94,7 @@ export async function onRequest(context: AgentContext) {
   const userMsgId = typeof body.userMsgId === 'string' ? body.userMsgId : undefined;
 
   const conversationId: string = context.conversation_id ?? '';
+  const callback = parseCallback(body.callback);
   const signal: AbortSignal | undefined = context.request.signal;
 
   logger.log(`[request] cid=${conversationId}, uid=${userId ?? '-'}, message="${message.slice(0, 50)}..."`);
@@ -115,6 +166,10 @@ export async function onRequest(context: AgentContext) {
     tools: createTools(),
     model: model,
   });
+
+  if (callback) {
+    return runWithCallback(agent, message, session, callback);
+  }
 
   // Map an SDK stream event to a business SSE event, or null to skip.
   const toSseEvent = (e: any) => {

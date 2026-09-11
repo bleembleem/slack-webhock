@@ -14,21 +14,32 @@
  *   Discord also needs agents/discord-gateway (Gateway WebSocket).
  *
  * Memory state adapter keeps subscriptions/locks in-process (lost on restart).
- * /chat already emits SSE text_delta; we adapt that iterable into post().
+ *
+ * Replies post a placeholder, hand the run to /chat without waiting, and let
+ * POST /chat-callback edit the placeholder when the answer arrives — a Cloud
+ * Function is killed at 120s, which is not enough for a long agent run.
  */
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { Chat, type Message, type SentMessage, type Thread } from 'chat';
+import {
+  Chat,
+  ThreadImpl,
+  type Channel,
+  type Message,
+  type SerializedThread,
+  type Thread,
+} from 'chat';
 import { createMemoryState } from '@chat-adapter/state-memory';
 import {
   buildAdapters,
   envFingerprint,
   resolveBotEnv,
+  vendorAdapter,
   type BotEnv,
   type ChatAdapters,
 } from './_adapters';
-import { discordDeleteEmptyThread } from './_adapters/discord';
+import { callbackSecret, type AgentCallback, type CallbackTarget } from './_callback';
 import { createLogger } from './_logger';
 
 const logger = createLogger('chat-bot');
@@ -44,47 +55,6 @@ export type ChatBot = Chat<ChatAdapters>;
 
 let bot: ChatBot | undefined;
 let cachedFingerprint = '';
-
-async function* sseTextDeltas(res: Response): AsyncIterable<string> {
-  const reader = res.body?.getReader();
-  if (!reader) return;
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split('\n\n');
-    buffer = parts.pop() || '';
-
-    for (const part of parts) {
-      let eventType = '';
-      let data = '';
-      for (const line of part.split('\n')) {
-        if (line.startsWith('event: ')) eventType = line.slice(7).trim();
-        else if (line.startsWith('data: ')) data = line.slice(6);
-      }
-      if (eventType !== 'text_delta' || !data) continue;
-      try {
-        const parsed = JSON.parse(data) as { delta?: unknown };
-        if (typeof parsed.delta === 'string' && parsed.delta) yield parsed.delta;
-      } catch {
-        /* ignore malformed frames */
-      }
-    }
-  }
-}
-
-async function* withFallback(source: AsyncIterable<string>): AsyncIterable<string> {
-  let any = false;
-  for await (const chunk of source) {
-    any = true;
-    yield chunk;
-  }
-  if (!any) yield '(empty response)';
-}
 
 /**
  * Agent sticky routing expects the same conversation-id shape the web UI uses:
@@ -115,14 +85,17 @@ function userSeed(platform: string, qualifiedUserId: string): string {
   return `${platform}-user:${qualifiedUserId}`;
 }
 
-async function streamAgent(opts: {
+type AgentRunOptions = {
   origin: string;
   message: string;
   platform: string;
   userId: string;
   conversationId: string;
-  signal?: AbortSignal;
-}): Promise<AsyncIterable<string>> {
+  callback: AgentCallback;
+  signal: AbortSignal;
+};
+
+async function postAgent(opts: AgentRunOptions): Promise<void> {
   const conversationId = uuidFromSeed(conversationSeed(opts.platform, opts.conversationId));
   const userId = uuidFromSeed(userSeed(opts.platform, opts.userId));
   const url = `${opts.origin}/chat`;
@@ -141,6 +114,7 @@ async function streamAgent(opts: {
     body: JSON.stringify({
       message: opts.message,
       userId,
+      callback: opts.callback,
     }),
     signal: opts.signal,
   });
@@ -149,83 +123,82 @@ async function streamAgent(opts: {
     const detail = await res.text().catch(() => '');
     throw new Error(`chat HTTP ${res.status}: ${detail.slice(0, 200)}`);
   }
-
-  return withFallback(sseTextDeltas(res));
 }
 
-const CHANNEL_THINKING = 'Thinking…';
-const CHANNEL_STREAM_EDIT_MS = 500;
+const THINKING = 'Thinking…';
+/** Long enough for the agent to reject a run outright, short enough to ack fast. */
+const DISPATCH_TIMEOUT_MS = 5_000;
 
-async function editChannelStream(
-  posted: SentMessage,
-  source: AsyncIterable<string>,
-): Promise<void> {
-  let text = '';
-  let lastPosted = CHANNEL_THINKING;
-  let lastEditAt = 0;
-
-  const flush = async (force: boolean) => {
-    if (!text || text === lastPosted) return;
-    if (!force && Date.now() - lastEditAt < CHANNEL_STREAM_EDIT_MS) return;
-    await posted.edit({ markdown: text });
-    lastPosted = text;
-    lastEditAt = Date.now();
-  };
-
-  for await (const chunk of source) {
-    text += chunk;
-    await flush(false);
+/**
+ * Hand the run to the agent and let go. The answer comes back out of band via
+ * POST /chat-callback, which is the only way to outlive the 120s Cloud Function
+ * ceiling.
+ *
+ * We wait briefly so a rejected run still surfaces as an error here, then abort
+ * to detach. Aborting closes our connection but does not stop the run — /chat
+ * ignores its request signal whenever a callback is set.
+ */
+async function dispatchAgent(opts: Omit<AgentRunOptions, 'signal'>): Promise<void> {
+  const detach = new AbortController();
+  const timer = setTimeout(() => detach.abort(), DISPATCH_TIMEOUT_MS);
+  try {
+    await postAgent({ ...opts, signal: detach.signal });
+    logger.log(`agent run finished within the dispatch window conversation=${opts.conversationId}`);
+  } catch (e) {
+    if (!detach.signal.aborted) throw e;
+    logger.log(`agent run detached conversation=${opts.conversationId}; awaiting callback`);
+  } finally {
+    clearTimeout(timer);
   }
-  await flush(true);
 }
 
-async function streamToChannel(opts: {
-  post: (text: string) => Promise<SentMessage>;
+/**
+ * The reply surface as something both this request and /chat-callback can
+ * rebuild. A Chat SDK thread id encodes where messages go, so pointing it at
+ * the channel is what makes both `post` and `edit` land there.
+ *
+ * Omit `threadId` to reply in the channel itself.
+ */
+function replySurfaceOf(channel: Channel, threadId?: string): SerializedThread {
+  const json = channel.toJSON();
+  return {
+    _type: 'chat:Thread',
+    adapterName: json.adapterName,
+    channelId: json.id,
+    ...(json.channelVisibility ? { channelVisibility: json.channelVisibility } : {}),
+    id: threadId ?? json.id,
+    isDM: json.isDM,
+  };
+}
+
+async function respond(opts: {
+  env: BotEnv;
+  surface: SerializedThread;
   text: string;
   platform: string;
   userId: string;
-  conversationId: string;
-  signal?: AbortSignal;
   source: string;
 }): Promise<void> {
   const origin = requestContext.getStore()?.origin;
-  if (!origin) {
-    logger.error('missing request origin; cannot call /chat');
-    await opts.post('Sorry, I could not complete that request.');
-    return;
-  }
+  if (!origin) throw new Error('missing request origin; cannot call /chat');
+  const secret = callbackSecret(opts.env);
+  if (!secret) throw new Error('AGENT_CALLBACK_SECRET is not configured');
 
+  const conversationId = opts.surface.id;
   logger.log(
-    `${opts.source} platform=${opts.platform} conversation=${opts.conversationId} user=${opts.userId} text="${opts.text.slice(0, 50)}"`,
+    `${opts.source} platform=${opts.platform} conversation=${conversationId} user=${opts.userId} text="${opts.text.slice(0, 50)}"`,
   );
 
-  let placeholder: SentMessage | undefined;
-  try {
-    placeholder = await opts.post(CHANNEL_THINKING);
-    const stream = await streamAgent({
-      origin,
-      message: opts.text,
-      platform: opts.platform,
-      userId: `${opts.platform}:${opts.userId}`,
-      conversationId: opts.conversationId,
-      signal: opts.signal,
-    });
-    await editChannelStream(placeholder, stream);
-    logger.log(`${opts.source} posted channel message conversation=${opts.conversationId}`);
-  } catch (e) {
-    const detail = e instanceof Error ? e.stack || e.message : String(e);
-    logger.error(`failed to handle thread: ${detail}`);
-    try {
-      if (placeholder) {
-        await placeholder.edit('Sorry, I could not complete that request.');
-      } else {
-        await opts.post('Sorry, I could not complete that request.');
-      }
-    } catch (postErr) {
-      const postDetail = postErr instanceof Error ? postErr.message : String(postErr);
-      logger.error(`failed to post error reply: ${postDetail}`);
-    }
-  }
+  const placeholder = await ThreadImpl.fromJSON(opts.surface).post(THINKING);
+  const target: CallbackTarget = { thread: opts.surface, message: placeholder.toJSON() };
+  await dispatchAgent({
+    origin,
+    message: opts.text,
+    platform: opts.platform,
+    userId: `${opts.platform}:${opts.userId}`,
+    conversationId,
+    callback: { url: `${origin}/chat-callback`, token: secret, target },
+  });
 }
 
 async function replyToThread(
@@ -241,23 +214,21 @@ async function replyToThread(
     return;
   }
 
-  // Discord opens a throwaway thread for every mention, so answering in it
-  // would isolate each question in its own conversation and clutter the
-  // channel. Slack threads are started by people and worth replying inside.
   const platform = platformFromThreadId(thread.id);
-  const inChannel = platform === 'discord';
-  if (inChannel) {
+  const vendor = vendorAdapter(platform);
+  const replyInChannel = vendor?.replySurface === 'channel';
+  const surface = replySurfaceOf(thread.channel, replyInChannel ? undefined : thread.id);
+  if (replyInChannel) {
     const raw = message.raw as { channel_id?: string } | undefined;
-    await discordDeleteEmptyThread(env, thread.id, raw?.channel_id);
+    await vendor?.discardUnusedThread?.(env, thread.id, raw?.channel_id);
   }
 
-  await streamToChannel({
-    post: (text) => (inChannel ? thread.channel.post(text) : thread.post(text)),
+  await respond({
+    env,
+    surface,
     text: message.text.trim() || '(The user sent a message with no text.)',
     platform,
     userId: message.author.userId,
-    conversationId: inChannel ? thread.channel.id : thread.id,
-    signal: thread.signal,
     source,
   });
 }
@@ -275,6 +246,10 @@ function createBot(env: BotEnv): ChatBot {
     logger: 'info',
   });
 
+  // ThreadImpl.fromJSON resolves its adapter from the Chat singleton, both when
+  // building the reply surface here and when /chat-callback rebuilds it.
+  chat.registerSingleton();
+
   chat.onNewMention(async (thread, message) => {
     await replyToThread(env, thread, message, 'onNewMention');
   });
@@ -288,13 +263,12 @@ function createBot(env: BotEnv): ChatBot {
       logger.log(`skip onSlashCommand isMe=${event.user.isMe} isBot=${event.user.isBot}`);
       return;
     }
-    const text = event.text.trim() || event.command;
-    await streamToChannel({
-      post: (markdown) => event.channel.post(markdown),
-      text,
+    await respond({
+      env,
+      surface: replySurfaceOf(event.channel),
+      text: event.text.trim() || event.command,
       platform: platformFromThreadId(event.channel.id),
       userId: event.user.userId,
-      conversationId: event.channel.id,
       source: `onSlashCommand:${event.command}`,
     });
   });

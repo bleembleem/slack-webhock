@@ -117,7 +117,8 @@ export function discordGatewaySecret(env: DiscordEnv): string {
 /**
  * The adapter opens a Discord thread for every mention before our handlers run
  * and offers no way to turn that off. We answer in the channel, so that thread
- * stays empty — delete it instead of littering the channel. Needs Manage Threads.
+ * stays empty — delete it instead of littering the channel. Needs Manage
+ * Threads; without it this throws and the reply never goes out.
  *
  * Chat SDK thread ids are `discord:guildId:channelId[:threadId]`.
  *
@@ -141,21 +142,17 @@ export async function discordDeleteEmptyThread(
   }
 
   const botToken = normalizeSecret(env.DISCORD_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN);
-  if (!botToken) return;
+  if (!botToken) throw new Error('DISCORD_BOT_TOKEN is not configured');
 
-  try {
-    const response = await fetch(`https://discord.com/api/v10/channels/${discordThreadId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bot ${botToken}` },
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      logger.error(
-        `failed to delete empty thread ${discordThreadId}: HTTP ${response.status} ${detail.slice(0, 120)}`,
-      );
-    }
-  } catch (e) {
-    logger.error(`failed to delete empty thread ${discordThreadId}: ${String(e)}`);
+  const response = await fetch(`https://discord.com/api/v10/channels/${discordThreadId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bot ${botToken}` },
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(
+      `failed to delete thread ${discordThreadId}: HTTP ${response.status} ${detail.slice(0, 120)}`,
+    );
   }
 }
 
@@ -298,4 +295,6 @@ export const discordAdapter = {
   summarize: discordSummarize,
   respond: discordRespond,
   prepare: discordPrepare,
+  replySurface: 'channel' as const,
+  discardUnusedThread: discordDeleteEmptyThread,
 };
