@@ -36,6 +36,7 @@ const FALLBACK_HEADERS = [
   'x-signature-ed25519',
   'x-signature-timestamp',
   'x-discord-gateway-token',
+  'x-telegram-bot-api-secret-token',
 ] as const;
 
 export function jsonResponse(data: unknown, status = 200): Response {
@@ -222,7 +223,8 @@ export async function runChatWebhook(
   const hasVendorSig = Boolean(
     webRequest.headers.get('x-slack-signature') ||
       webRequest.headers.get('x-signature-ed25519') ||
-      webRequest.headers.get('x-discord-gateway-token'),
+      webRequest.headers.get('x-discord-gateway-token') ||
+      webRequest.headers.get('x-telegram-bot-api-secret-token'),
   );
   logger.log(
     `origin=${origin} request.url=${request.url} body_len=${rawBody.length} body_kind=${incomingKind}` +

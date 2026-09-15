@@ -12,6 +12,7 @@
  *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
  *   cloud-functions/slack/index.ts               → POST /slack                 Slack Events API (ack + Chat SDK handle)
  *   cloud-functions/discord/index.ts             → POST /discord               Discord Interactions (PING / slash / buttons)
+ *   cloud-functions/telegram/index.ts            → POST /telegram              Telegram Bot API webhook (ack + Chat SDK handle)
  *   cloud-functions/debug-log/index.ts           → POST /debug-log             Debug log sink (Cloud Function logs)
  *   cloud-functions/test/index.ts                → GET /test                   Probe endpoint
  *

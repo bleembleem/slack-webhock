@@ -18,8 +18,9 @@
 import { resolveCallbackEnv, type CallbackEnv } from '../_callback';
 import { discordAdapter, type DiscordEnv } from './discord';
 import { slackAdapter, type SlackEnv } from './slack';
+import { telegramAdapter, type TelegramEnv } from './telegram';
 
-export type BotEnv = SlackEnv & DiscordEnv & CallbackEnv;
+export type BotEnv = SlackEnv & DiscordEnv & TelegramEnv & CallbackEnv;
 
 export type VendorRespond = 'sdk' | 'ack';
 
@@ -75,12 +76,14 @@ export type VendorAdapter = {
 export type ChatAdapters = {
   slack?: NonNullable<ReturnType<typeof slackAdapter.create>>;
   discord?: NonNullable<ReturnType<typeof discordAdapter.create>>;
+  telegram?: NonNullable<ReturnType<typeof telegramAdapter.create>>;
 };
 
 export function resolveBotEnv(env: BotEnv): BotEnv {
   return {
     ...slackAdapter.resolveEnv(env),
     ...discordAdapter.resolveEnv(env),
+    ...telegramAdapter.resolveEnv(env),
     ...resolveCallbackEnv(env),
   };
 }
@@ -89,12 +92,14 @@ export function envFingerprint(env: BotEnv): string {
   return JSON.stringify({
     ...slackAdapter.fingerprint(env),
     ...discordAdapter.fingerprint(env),
+    ...telegramAdapter.fingerprint(env),
   });
 }
 
 const vendorAdapters: Record<string, VendorAdapter> = {
   [slackAdapter.name]: slackAdapter,
   [discordAdapter.name]: discordAdapter,
+  [telegramAdapter.name]: telegramAdapter,
 };
 
 /** Look up a vendor by the platform prefix of a Chat SDK thread id. */
@@ -108,7 +113,9 @@ export function buildAdapters(env: BotEnv): ChatAdapters {
   if (slack) adapters.slack = slack;
   const discord = discordAdapter.create(env);
   if (discord) adapters.discord = discord;
+  const telegram = telegramAdapter.create(env);
+  if (telegram) adapters.telegram = telegram;
   return adapters;
 }
 
-export { discordAdapter, slackAdapter };
+export { discordAdapter, slackAdapter, telegramAdapter };
