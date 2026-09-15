@@ -70,15 +70,67 @@ export function createFeishuChatAdapter(env: FeishuEnv) {
   });
 }
 
+function feishuPayload(rawBody: string, parsedBody?: unknown): Record<string, unknown> | undefined {
+  if (rawBody) {
+    try {
+      const parsed = JSON.parse(rawBody) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* not JSON */
+    }
+  }
+  if (typeof parsedBody === 'string' && parsedBody) {
+    try {
+      const parsed = JSON.parse(parsedBody) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  if (parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)) {
+    return parsedBody as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+/**
+ * Feishu URL verification must return `{"challenge"}` as JSON within 1s.
+ * If this function returns undefined, `_process` acks with plain text `ok`,
+ * and the console reports "返回数据不是合法的JSON格式".
+ */
 export function feishuHandshake(
   rawBody: string,
   parsedBody?: unknown,
   env?: Record<string, string | undefined>,
 ): Response | undefined {
+  const payload = feishuPayload(rawBody, parsedBody);
   const encryptKey = normalizeSecret(env?.FEISHU_ENCRYPT_KEY || process.env.FEISHU_ENCRYPT_KEY);
-  const verified = verifyFeishuUrl(rawBody || JSON.stringify(parsedBody ?? {}), encryptKey);
-  if (!verified) return undefined;
-  return jsonResponse({ challenge: verified.challenge });
+
+  if (payload?.type === 'url_verification' && typeof payload.challenge === 'string') {
+    return jsonResponse({ challenge: payload.challenge });
+  }
+
+  const wire = rawBody || (typeof parsedBody === 'string' ? parsedBody : JSON.stringify(payload ?? {}));
+  const looksEncrypted = typeof payload?.encrypt === 'string' && payload.encrypt.length > 0;
+  const verified = verifyFeishuUrl(wire, encryptKey);
+  if (verified) return jsonResponse({ challenge: verified.challenge });
+
+  if (looksEncrypted || payload?.type === 'url_verification') {
+    logger.error(
+      looksEncrypted
+        ? 'url_verification is encrypted but decrypt failed; check FEISHU_ENCRYPT_KEY'
+        : 'url_verification is missing a string challenge',
+    );
+    return jsonResponse(
+      { status: 'error', message: 'feishu url_verification failed' },
+      400,
+    );
+  }
+  return undefined;
 }
 
 export function feishuSummarize(rawBody: string): string {
