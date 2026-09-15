@@ -38,29 +38,37 @@ function feishuDecrypt(encryptKey: string, encrypt: string): string {
   return Buffer.concat([decipher.update(buf.subarray(16)), decipher.final()]).toString('utf8');
 }
 
-function challengeFromBody(rawBody: string, encryptKey: string): string | undefined {
+function challengeFromBody(
+  rawBody: string,
+  encryptKey: string,
+): { challenge?: string; encrypted: boolean; decryptFailed: boolean } {
   let outer: { encrypt?: unknown; type?: unknown; challenge?: unknown };
   try {
     outer = JSON.parse(rawBody) as typeof outer;
   } catch {
-    return undefined;
+    return { encrypted: false, decryptFailed: false };
   }
   if (outer.type === 'url_verification' && typeof outer.challenge === 'string') {
-    return outer.challenge;
+    return { challenge: outer.challenge, encrypted: false, decryptFailed: false };
   }
-  if (typeof outer.encrypt !== 'string' || !outer.encrypt || !encryptKey) return undefined;
+  if (typeof outer.encrypt !== 'string' || !outer.encrypt) {
+    return { encrypted: false, decryptFailed: false };
+  }
+  if (!encryptKey) {
+    return { encrypted: true, decryptFailed: true };
+  }
   try {
     const inner = JSON.parse(feishuDecrypt(encryptKey, outer.encrypt)) as {
       type?: unknown;
       challenge?: unknown;
     };
     if (inner.type === 'url_verification' && typeof inner.challenge === 'string') {
-      return inner.challenge;
+      return { challenge: inner.challenge, encrypted: true, decryptFailed: false };
     }
+    return { encrypted: true, decryptFailed: false };
   } catch {
-    return undefined;
+    return { encrypted: true, decryptFailed: true };
   }
-  return undefined;
 }
 
 async function readBody(request: CloudFunctionContext['request']): Promise<string> {
@@ -112,10 +120,20 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
   if (!request) return jsonResponse({ status: 'error', message: 'missing request' }, 400);
 
   const rawBody = await readBody(request);
-  const challenge = challengeFromBody(rawBody, encryptKeyFrom(context.env));
-  if (challenge) {
-    console.log(`[feishu][${new Date().toISOString()}] handshake challenge`);
-    return jsonResponse({ challenge });
+  const parsed = challengeFromBody(rawBody, encryptKeyFrom(context.env));
+  if (parsed.challenge) {
+    console.log(`[feishu][${new Date().toISOString()}] handshake challenge encrypted=${parsed.encrypted}`);
+    return jsonResponse({ challenge: parsed.challenge });
+  }
+  // Encrypted url_verification must never fall through to plain-text `ok`.
+  if (parsed.decryptFailed) {
+    console.error(
+      `[feishu][${new Date().toISOString()}] encrypt payload but decrypt failed; check FEISHU_ENCRYPT_KEY`,
+    );
+    return jsonResponse(
+      { status: 'error', message: 'feishu url_verification decrypt failed' },
+      400,
+    );
   }
 
   const origin = requestOrigin(request);
