@@ -4,15 +4,10 @@
  *
  * File path cloud-functions/chat-callback/index.ts maps to **POST /chat-callback**.
  *
- * An IM webhook posts a "Thinking…" placeholder and hands the run to /chat
- * without waiting. The agent POSTs the finished answer here, and this route
- * edits that placeholder in place. See _callback.ts for the contract.
- *
- * This makes the bot speak, so it requires AGENT_CALLBACK_SECRET as a bearer
- * token.
- *
- * Nothing here is platform-specific: the payload carries a Chat SDK
- * SerializedThread, and every adapter implements `editMessage`.
+ * An IM webhook hands the run to /chat without waiting. The agent POSTs the
+ * finished answer here. Platforms that posted a "Thinking…" placeholder send
+ * that message in `target.message` and this route edits it; the rest get a
+ * new `thread.post`. See _callback.ts for the contract.
  */
 
 import type { CloudFunctionContext } from '@edgeone/types';
@@ -39,14 +34,20 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
   }
 
   const { target, text } = (await context.request!.json()) as CallbackRequest;
-  logger.log(`thread=${target.thread.id} message=${target.message.id} len=${text.length}`);
+  logger.log(
+    `thread=${target.thread.id} message=${target.message?.id ?? 'none'} len=${text.length}`,
+  );
 
   // Builds the Chat singleton that ThreadImpl.fromJSON resolves its adapter from.
   getChatBot(context.env);
 
   const thread = ThreadImpl.fromJSON(target.thread);
-  const placeholder = thread.createSentMessageFromMessage(Message.fromJSON(target.message));
-  await placeholder.edit({ markdown: text });
+  if (target.message) {
+    const placeholder = thread.createSentMessageFromMessage(Message.fromJSON(target.message));
+    await placeholder.edit({ markdown: text });
+  } else {
+    await thread.post({ markdown: text });
+  }
 
   logger.log(`[chat-callback] done: total ${Date.now() - startTime}ms`);
   return new Response(JSON.stringify({ status: 'ok' }), { headers: JSON_HEADERS });

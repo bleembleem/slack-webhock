@@ -2,18 +2,21 @@
  * Async agent callback — private module (starts with _), not mapped as a route.
  *
  * Cloud Functions are killed at 120s, so an IM webhook cannot wait for a slow
- * agent run. It posts a placeholder, hands the agent everything needed to find
- * that message again, and returns. The agent POSTs its answer to
- * /chat-callback, which edits the placeholder in place.
+ * agent run. Platforms that can edit a sent message post a placeholder and
+ * hand the agent everything needed to find that message again. Platforms that
+ * cannot (Feishu text, WeCom, DingTalk) skip the placeholder; the agent POSTs
+ * the answer to /chat-callback, which posts a new message on the thread.
  *
  *   POST /discord ──► post placeholder ──► POST /chat (does not wait)
  *                                              │
  *                     edit placeholder ◄── POST /chat-callback
  *
- * `CallbackTarget` is deliberately platform-agnostic. `channelIdFromThreadId`
- * and `editMessage` are required members of the Chat SDK Adapter interface, so
- * Telegram, Feishu and WeCom go through this same path once their adapters are
- * registered — nothing here needs to know which platform it is holding.
+ *   POST /feishu  ──► POST /chat (does not wait)
+ *                          │
+ *                     post answer ◄── POST /chat-callback
+ *
+ * `CallbackTarget` is deliberately platform-agnostic. Nothing here needs to
+ * know which platform it is holding.
  */
 
 import { timingSafeEqual } from 'node:crypto';
@@ -31,8 +34,11 @@ export type CallbackTarget = {
    * `replySurface` choice.
    */
   thread: SerializedThread;
-  /** The placeholder to edit, from `SentMessage.toJSON()`. */
-  message: SerializedMessage;
+  /**
+   * The placeholder to edit, from `SentMessage.toJSON()`. Absent when the
+   * vendor cannot edit a sent message — /chat-callback then posts instead.
+   */
+  message?: SerializedMessage;
 };
 
 /** What the webhook tells the agent about reporting back. */

@@ -189,8 +189,12 @@ async function respond(opts: {
     `${opts.source} platform=${opts.platform} conversation=${conversationId} user=${opts.userId} text="${opts.text.slice(0, 50)}"`,
   );
 
-  const placeholder = await ThreadImpl.fromJSON(opts.surface).post(THINKING);
-  const target: CallbackTarget = { thread: opts.surface, message: placeholder.toJSON() };
+  const usePlaceholder = vendorAdapter(opts.platform)?.placeholder !== false;
+  const target: CallbackTarget = { thread: opts.surface };
+  if (usePlaceholder) {
+    const placeholder = await ThreadImpl.fromJSON(opts.surface).post(THINKING);
+    target.message = placeholder.toJSON();
+  }
   await dispatchAgent({
     origin,
     message: opts.text,

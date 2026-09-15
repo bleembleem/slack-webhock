@@ -2,25 +2,28 @@
  * Chat SDK adapter registry — private module, not mapped as a route.
  *
  * Add a vendor:
- *   1. package.json: @chat-adapter/<name>
+ *   1. Official package: package.json @chat-adapter/<name>
+ *      or community: @edgeone/chat-adapter-feishu / wecom / dingtalk
  *   2. this directory: <name>.ts, then wire create / resolveEnv / fingerprint
  *   3. cloud-functions/<name>/index.ts with createVendorWebhook(<name>Adapter)
  *   4. this file: register it in `vendorAdapters`
  *   If the vendor has no HTTP events (e.g. Discord Gateway messages), add a
  *   long-lived listener outside this webhook route.
  *
- * Replying and editing stay platform-agnostic — `_bot.ts` and /chat-callback go
- * through the Chat SDK, which requires every adapter to implement `editMessage`
- * and `channelIdFromThreadId`. `replySurface` below is the only knob a new
- * vendor is likely to need.
+ * `replySurface` and `placeholder` are the knobs a new vendor is likely to
+ * need. Platforms that cannot edit a sent message set `placeholder: false`
+ * and /chat-callback posts a new message instead.
  */
 
 import { resolveCallbackEnv, type CallbackEnv } from '../_callback';
+import { dingtalkAdapter, type DingtalkEnv } from './dingtalk';
 import { discordAdapter, type DiscordEnv } from './discord';
+import { feishuAdapter, type FeishuEnv } from './feishu';
 import { slackAdapter, type SlackEnv } from './slack';
 import { telegramAdapter, type TelegramEnv } from './telegram';
+import { wecomAdapter, type WecomEnv } from './wecom';
 
-export type BotEnv = SlackEnv & DiscordEnv & TelegramEnv & CallbackEnv;
+export type BotEnv = SlackEnv & DiscordEnv & TelegramEnv & FeishuEnv & WecomEnv & DingtalkEnv & CallbackEnv;
 
 export type VendorRespond = 'sdk' | 'ack';
 
@@ -38,6 +41,13 @@ export type VendorAdapter = {
   /** Default `thread`. */
   replySurface?: ReplySurface;
   /**
+   * Post a "Thinking…" placeholder and edit it when the answer lands. Default
+   * `true`. Off where the platform cannot edit a sent message: WeCom only has
+   * update_template_card (single-use response_code, buttons only), and Feishu
+   * PATCH works on interactive cards alone.
+   */
+  placeholder?: boolean;
+  /**
    * Discard a thread the platform opened on our behalf that we did not reply
    * in. Only called when `replySurface` moved the reply somewhere else.
    */
@@ -46,7 +56,16 @@ export type VendorAdapter = {
     threadId: string,
     sourceChannelId: string | undefined,
   ) => Promise<void>;
-  handshake?: (rawBody: string, parsedBody?: unknown) => Response | undefined;
+  handshake?: (
+    rawBody: string,
+    parsedBody?: unknown,
+    env?: Record<string, string | undefined>,
+  ) => Response | undefined;
+  /** WeCom URL verification is a GET with echostr, not a POST body. */
+  handshakeGet?: (
+    request: { url: string; headers: { get(name: string): string | null } },
+    env?: Record<string, string | undefined>,
+  ) => Response | Promise<Response | undefined> | undefined;
   /**
    * Ack a delivery without processing it, returning the reason to log. For
    * redeliveries the vendor sends when our ack looks slow — the first delivery
@@ -77,6 +96,9 @@ export type ChatAdapters = {
   slack?: NonNullable<ReturnType<typeof slackAdapter.create>>;
   discord?: NonNullable<ReturnType<typeof discordAdapter.create>>;
   telegram?: NonNullable<ReturnType<typeof telegramAdapter.create>>;
+  feishu?: NonNullable<ReturnType<typeof feishuAdapter.create>>;
+  wecom?: NonNullable<ReturnType<typeof wecomAdapter.create>>;
+  dingtalk?: NonNullable<ReturnType<typeof dingtalkAdapter.create>>;
 };
 
 export function resolveBotEnv(env: BotEnv): BotEnv {
@@ -84,6 +106,9 @@ export function resolveBotEnv(env: BotEnv): BotEnv {
     ...slackAdapter.resolveEnv(env),
     ...discordAdapter.resolveEnv(env),
     ...telegramAdapter.resolveEnv(env),
+    ...feishuAdapter.resolveEnv(env),
+    ...wecomAdapter.resolveEnv(env),
+    ...dingtalkAdapter.resolveEnv(env),
     ...resolveCallbackEnv(env),
   };
 }
@@ -93,6 +118,9 @@ export function envFingerprint(env: BotEnv): string {
     ...slackAdapter.fingerprint(env),
     ...discordAdapter.fingerprint(env),
     ...telegramAdapter.fingerprint(env),
+    ...feishuAdapter.fingerprint(env),
+    ...wecomAdapter.fingerprint(env),
+    ...dingtalkAdapter.fingerprint(env),
   });
 }
 
@@ -100,6 +128,9 @@ const vendorAdapters: Record<string, VendorAdapter> = {
   [slackAdapter.name]: slackAdapter,
   [discordAdapter.name]: discordAdapter,
   [telegramAdapter.name]: telegramAdapter,
+  [feishuAdapter.name]: feishuAdapter,
+  [wecomAdapter.name]: wecomAdapter,
+  [dingtalkAdapter.name]: dingtalkAdapter,
 };
 
 /** Look up a vendor by the platform prefix of a Chat SDK thread id. */
@@ -115,7 +146,13 @@ export function buildAdapters(env: BotEnv): ChatAdapters {
   if (discord) adapters.discord = discord;
   const telegram = telegramAdapter.create(env);
   if (telegram) adapters.telegram = telegram;
+  const feishu = feishuAdapter.create(env);
+  if (feishu) adapters.feishu = feishu;
+  const wecom = wecomAdapter.create(env);
+  if (wecom) adapters.wecom = wecom;
+  const dingtalk = dingtalkAdapter.create(env);
+  if (dingtalk) adapters.dingtalk = dingtalk;
   return adapters;
 }
 
-export { discordAdapter, slackAdapter, telegramAdapter };
+export { dingtalkAdapter, discordAdapter, feishuAdapter, slackAdapter, telegramAdapter, wecomAdapter };

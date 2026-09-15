@@ -37,6 +37,11 @@ const FALLBACK_HEADERS = [
   'x-signature-timestamp',
   'x-discord-gateway-token',
   'x-telegram-bot-api-secret-token',
+  'x-lark-signature',
+  'x-lark-request-timestamp',
+  'x-lark-request-nonce',
+  'timestamp',
+  'sign',
 ] as const;
 
 export function jsonResponse(data: unknown, status = 200): Response {
@@ -160,6 +165,7 @@ export type RunChatWebhookOptions = {
   adapter: string;
   assertEnv: (env: Record<string, string | undefined>) => Response | void;
   handshake?: VendorAdapter['handshake'];
+  handshakeGet?: VendorAdapter['handshakeGet'];
   skip?: VendorAdapter['skip'];
   summarize?: VendorAdapter['summarize'];
   respond?: VendorAdapter['respond'];
@@ -192,7 +198,7 @@ export async function runChatWebhook(
   const incomingKind = bodyKind(request.body);
   logger.log(opts.summarize?.(rawBody, request) ?? `body_kind=${incomingKind} body_len=${rawBody.length}`);
 
-  const handshake = opts.handshake?.(rawBody, request.body);
+  const handshake = opts.handshake?.(rawBody, request.body, context.env);
   if (handshake) {
     logger.log('handshake reply');
     return handshake;
@@ -224,7 +230,9 @@ export async function runChatWebhook(
     webRequest.headers.get('x-slack-signature') ||
       webRequest.headers.get('x-signature-ed25519') ||
       webRequest.headers.get('x-discord-gateway-token') ||
-      webRequest.headers.get('x-telegram-bot-api-secret-token'),
+      webRequest.headers.get('x-telegram-bot-api-secret-token') ||
+      webRequest.headers.get('x-lark-signature') ||
+      webRequest.headers.get('sign'),
   );
   logger.log(
     `origin=${origin} request.url=${request.url} body_len=${rawBody.length} body_kind=${incomingKind}` +
@@ -302,5 +310,28 @@ export function createVendorWebhook(adapter: VendorAdapter) {
       respond: adapter.respond,
       prepare: adapter.prepare,
     });
+  };
+}
+
+/**
+ * WeCom (and any vendor whose URL verification is a GET) uses this instead of
+ * runChatWebhook — there is no body for Chat SDK to verify.
+ */
+export function createVendorWebhookGet(adapter: VendorAdapter) {
+  return async function onRequestGet(context: CloudFunctionContext): Promise<Response> {
+    const logger = createLogger(adapter.name);
+    const request = context.request;
+    if (!request) {
+      return jsonResponse({ status: 'error', message: 'missing request' }, 400);
+    }
+    const envError = adapter.assertEnv(context.env);
+    if (envError) return envError;
+    const reply = await adapter.handshakeGet?.(request, context.env);
+    if (!reply) {
+      logger.error('GET handshake is not implemented');
+      return jsonResponse({ status: 'error', message: 'unsupported method' }, 405);
+    }
+    logger.log('GET handshake reply');
+    return reply;
   };
 }
