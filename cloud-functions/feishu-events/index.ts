@@ -10,6 +10,19 @@
  */
 
 import { feishuAdapter } from '../_adapters';
-import { createVendorWebhook } from '../_process';
+import { createVendorWebhook, jsonResponse } from '../_process';
 
-export const onRequestPost = createVendorWebhook(feishuAdapter);
+const onPost = createVendorWebhook(feishuAdapter);
+
+export async function onRequest(context: Parameters<typeof onPost>[0]) {
+  const method = String(context.request?.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return jsonResponse({ status: 'ok', service: 'feishu-events' });
+  }
+  return onPost(context);
+}
+
+export const onRequestPost = onPost;
+export const onRequestGet = onRequest;
+export const onRequestHead = onRequest;
+export const onRequestOptions = onRequest;
