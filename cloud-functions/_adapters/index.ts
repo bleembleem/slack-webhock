@@ -46,6 +46,15 @@ export type VendorAdapter = {
     sourceChannelId: string | undefined,
   ) => Promise<void>;
   handshake?: (rawBody: string, parsedBody?: unknown) => Response | undefined;
+  /**
+   * Ack a delivery without processing it, returning the reason to log. For
+   * redeliveries the vendor sends when our ack looks slow — the first delivery
+   * already posted a placeholder and dispatched the run.
+   */
+  skip?: (
+    rawBody: string,
+    request: { headers: { get(name: string): string | null } },
+  ) => string | undefined;
   summarize?: (
     rawBody: string,
     request: { headers: { get(name: string): string | null } },

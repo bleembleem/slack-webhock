@@ -159,6 +159,7 @@ export type RunChatWebhookOptions = {
   adapter: string;
   assertEnv: (env: Record<string, string | undefined>) => Response | void;
   handshake?: VendorAdapter['handshake'];
+  skip?: VendorAdapter['skip'];
   summarize?: VendorAdapter['summarize'];
   respond?: VendorAdapter['respond'];
   prepare?: VendorAdapter['prepare'];
@@ -194,6 +195,12 @@ export async function runChatWebhook(
   if (handshake) {
     logger.log('handshake reply');
     return handshake;
+  }
+
+  const skip = opts.skip?.(rawBody, request);
+  if (skip) {
+    logger.log(`acking without processing: ${skip}`);
+    return emptyOk();
   }
 
   const envError = opts.assertEnv(context.env);
@@ -288,6 +295,7 @@ export function createVendorWebhook(adapter: VendorAdapter) {
       adapter: adapter.name,
       assertEnv: adapter.assertEnv,
       handshake: adapter.handshake,
+      skip: adapter.skip,
       summarize: adapter.summarize,
       respond: adapter.respond,
       prepare: adapter.prepare,
