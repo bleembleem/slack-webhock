@@ -83,21 +83,38 @@ export function slackHandshake(rawBody: string, parsedBody?: unknown): Response 
 }
 
 /**
- * Slack delivers one user message twice whenever two subscribed events describe
- * it: a channel @mention arrives as both `app_mention` and `message.channels`,
- * under two event ids sharing one message ts. The Chat SDK collapses those on
- * `dedupe:slack:<ts>` via the state adapter, but ours is per-process memory and
- * the two deliveries land in separate invocations, so both survive and each
- * posts its own "Thinking…" placeholder.
+ * Slack can describe one user message twice (`app_mention` + `message.channels`,
+ * or `app_mention` + `message.im` in a DM). Those share `event.ts` but not
+ * `event_id`. Drop the second copy we see on this instance.
  *
- * This bot only acts on mentions, DMs and slash commands, so one event per
- * surface is enough: `app_mention` for channels, `message.im` for DMs. Drop the
- * other copy of each.
+ * Do not drop a channel `message` just because an `app_mention` "should"
+ * exist — many apps only subscribe to `message.channels`, and that used to
+ * ack with no reply.
  *
- * Slack retries with `http_timeout` when the first ack missed the 3s window
- * (cold start). That first invocation is often aborted, so the retry is the
- * only copy that can reply. Other retry reasons still mean we already acked.
+ * Slack retries with `http_timeout` when the first ack missed the 3s window.
+ * Process those; skip other retry reasons.
  */
+const claimedTs = new Map<string, number>();
+const CLAIM_TTL_MS = 120_000;
+
+function claimSlackTs(ts: string): boolean {
+  const now = Date.now();
+  for (const [key, at] of claimedTs) {
+    if (now - at > CLAIM_TTL_MS) claimedTs.delete(key);
+  }
+  if (claimedTs.has(ts)) return false;
+  claimedTs.set(ts, now);
+  return true;
+}
+
+type SlackInnerEvent = {
+  type?: unknown;
+  channel?: unknown;
+  channel_type?: unknown;
+  ts?: unknown;
+  subtype?: unknown;
+};
+
 export function slackSkip(
   rawBody: string,
   request: { headers: { get(name: string): string | null } },
@@ -108,22 +125,27 @@ export function slackSkip(
     return `redelivery retry=${retryNum} reason=${reason}`;
   }
 
-  let event: { type?: unknown; channel?: unknown; channel_type?: unknown } | undefined;
+  let event: SlackInnerEvent | undefined;
   try {
-    event = (JSON.parse(rawBody) as { event?: typeof event }).event;
+    event = (JSON.parse(rawBody) as { event?: SlackInnerEvent }).event;
   } catch {
     return undefined;
   }
   if (!event) return undefined;
 
-  const channelType = typeof event.channel_type === 'string' ? event.channel_type : '';
-  if (event.type === 'message' && channelType !== 'im') {
-    return `message.${channelType || 'unknown'} already delivered as app_mention`;
+  const subtype = typeof event.subtype === 'string' ? event.subtype : '';
+  if (event.type === 'message' && subtype && subtype !== 'file_share' && subtype !== 'thread_broadcast') {
+    return `message subtype=${subtype}`;
   }
-  // Slack DM channel ids start with D. A mention typed inside a DM raises
-  // app_mention on top of the message.im we keep above.
+
+  // Prefer message.im over app_mention in DMs (same ts).
   if (event.type === 'app_mention' && typeof event.channel === 'string' && event.channel.startsWith('D')) {
     return `app_mention in DM already delivered as message.im`;
+  }
+
+  const ts = typeof event.ts === 'string' ? event.ts : '';
+  if (ts && (event.type === 'message' || event.type === 'app_mention') && !claimSlackTs(ts)) {
+    return `duplicate ts=${ts}`;
   }
   return undefined;
 }
