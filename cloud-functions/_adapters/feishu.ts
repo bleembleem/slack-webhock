@@ -101,6 +101,11 @@ function feishuPayload(rawBody: string, parsedBody?: unknown): Record<string, un
  * Feishu URL verification must return `{"challenge"}` as JSON within 1s.
  * If this function returns undefined, `_process` acks with plain text `ok`,
  * and the console reports "返回数据不是合法的JSON格式".
+ *
+ * An encrypted body is not evidence of a handshake — real events are encrypted
+ * too, and `verifyFeishuUrl` returns undefined for both a real event and a key
+ * mismatch. Only a decrypted `url_verification` may answer with a challenge;
+ * everything else has to fall through so Chat SDK handles the event.
  */
 export function feishuHandshake(
   rawBody: string,
@@ -115,20 +120,16 @@ export function feishuHandshake(
   }
 
   const wire = rawBody || (typeof parsedBody === 'string' ? parsedBody : JSON.stringify(payload ?? {}));
-  const looksEncrypted = typeof payload?.encrypt === 'string' && payload.encrypt.length > 0;
   const verified = verifyFeishuUrl(wire, encryptKey);
   if (verified) return jsonResponse({ challenge: verified.challenge });
 
-  if (looksEncrypted || payload?.type === 'url_verification') {
-    logger.error(
-      looksEncrypted
-        ? 'url_verification is encrypted but decrypt failed; check FEISHU_ENCRYPT_KEY'
-        : 'url_verification is missing a string challenge',
-    );
-    return jsonResponse(
-      { status: 'error', message: 'feishu url_verification failed' },
-      400,
-    );
+  if (payload?.type === 'url_verification') {
+    logger.error('url_verification is missing a string challenge');
+    return jsonResponse({ status: 'error', message: 'feishu url_verification failed' }, 400);
+  }
+
+  if (typeof payload?.encrypt === 'string' && payload.encrypt.length > 0 && !encryptKey) {
+    logger.error('FEISHU_ENCRYPT_KEY is not configured; encrypted payload cannot be read');
   }
   return undefined;
 }

@@ -13,8 +13,7 @@
  *   cloud-functions/slack/index.ts               → POST /slack                 Slack Events API (ack + Chat SDK handle)
  *   cloud-functions/discord/index.ts             → POST /discord               Discord Interactions (PING / slash / buttons)
  *   cloud-functions/telegram/index.ts            → POST /telegram              Telegram Bot API webhook (ack + Chat SDK handle)
- *   cloud-functions/feishu/index.ts              → GET|POST /feishu            Feishu URL verification (must ack in 1s)
- *   cloud-functions/feishu-events/index.ts       → GET|POST /feishu-events     Feishu im.message.receive_v1 worker
+ *   cloud-functions/feishu/index.ts              → POST /feishu                Feishu Events (ack + Chat SDK handle)
  *   cloud-functions/wecom/index.ts               → GET|POST /wecom             WeCom callback (GET echostr, POST messages)
  *   cloud-functions/dingtalk/index.ts            → POST /dingtalk              DingTalk robot webhook (ack + Chat SDK handle)
  *   cloud-functions/debug-log/index.ts           → POST /debug-log             Debug log sink (Cloud Function logs)

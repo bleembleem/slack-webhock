@@ -2,17 +2,15 @@
  * Feishu webhook — EdgeOne Makers Node Function
  * =============================================
  *
- * cloud-functions/feishu/index.ts            → /feishu
- * cloud-functions/feishu/[[default]].ts      → /feishu/
+ * File path cloud-functions/feishu/index.ts maps to **POST /feishu**.
  *
- * URL verification must return `{ challenge }` JSON within 1s.
- * Real events are forwarded to POST /feishu-events.
+ * Point Feishu's Event Request URL here. url_verification is answered
+ * immediately with `{ challenge }`. Events are acked 200; Chat SDK then
+ * verifies the signature and handles the event without awaiting the HTTP
+ * response.
  */
 
-export {
-  handleFeishuRequest as onRequest,
-  handleFeishuRequest as onRequestGet,
-  handleFeishuRequest as onRequestPost,
-  handleFeishuRequest as onRequestHead,
-  handleFeishuRequest as onRequestOptions,
-} from './_handshake';
+import { feishuAdapter } from '../_adapters';
+import { createVendorWebhook } from '../_process';
+
+export const onRequestPost = createVendorWebhook(feishuAdapter);
