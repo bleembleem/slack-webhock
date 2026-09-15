@@ -92,16 +92,19 @@ export function slackHandshake(rawBody: string, parsedBody?: unknown): Response 
  *
  * This bot only acts on mentions, DMs and slash commands, so one event per
  * surface is enough: `app_mention` for channels, `message.im` for DMs. Drop the
- * other copy of each. Redeliveries go too — the first delivery already posted
- * the placeholder and dispatched the run.
+ * other copy of each.
+ *
+ * Slack retries with `http_timeout` when the first ack missed the 3s window
+ * (cold start). That first invocation is often aborted, so the retry is the
+ * only copy that can reply. Other retry reasons still mean we already acked.
  */
 export function slackSkip(
   rawBody: string,
   request: { headers: { get(name: string): string | null } },
 ): string | undefined {
   const retryNum = Number(request.headers.get('x-slack-retry-num') ?? '0');
-  if (retryNum > 0) {
-    const reason = request.headers.get('x-slack-retry-reason') ?? '';
+  const reason = request.headers.get('x-slack-retry-reason') ?? '';
+  if (retryNum > 0 && reason !== 'http_timeout') {
     return `redelivery retry=${retryNum} reason=${reason}`;
   }
 
@@ -135,12 +138,16 @@ export function slackSummarize(
     const payload = JSON.parse(rawBody) as {
       type?: unknown;
       event_id?: unknown;
-      event?: { type?: unknown };
+      event?: { type?: unknown; channel_type?: unknown };
     };
     const type = typeof payload.type === 'string' ? payload.type : '';
     const eventType = typeof payload.event?.type === 'string' ? payload.event.type : '';
+    const channelType = typeof payload.event?.channel_type === 'string' ? payload.event.channel_type : '';
     const eventId = typeof payload.event_id === 'string' ? payload.event_id : '';
-    summary = `type=${type} event=${eventType} event_id=${eventId} body_len=${rawBody.length}`;
+    summary =
+      `type=${type} event=${eventType}` +
+      (channelType ? ` channel_type=${channelType}` : '') +
+      ` event_id=${eventId} body_len=${rawBody.length}`;
   } catch {
     summary = `type=unparsed body_len=${rawBody.length}`;
   }
