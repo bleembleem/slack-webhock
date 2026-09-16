@@ -296,6 +296,8 @@ export async function runChatWebhook(
     () => undefined,
     () => undefined,
   );
+  const waitUntil = (context as { waitUntil?: (task: Promise<unknown>) => void }).waitUntil;
+  if (typeof waitUntil === 'function') waitUntil(work);
   logger.log(`[${tag}] ack elapsed=${Date.now() - startTime}ms`);
   return opts.ack?.() ?? emptyOk();
 }

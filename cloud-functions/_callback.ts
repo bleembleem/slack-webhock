@@ -39,6 +39,11 @@ export type CallbackTarget = {
    * vendor cannot edit a sent message — /chat-callback then posts instead.
    */
   message?: SerializedMessage;
+  /**
+   * Vendor-issued one-shot reply URL (DingTalk sessionWebhook). Valid for
+   * ~60s; long enough for an agent run, avoids the OpenAPI group send.
+   */
+  replyUrl?: string;
 };
 
 /** What the webhook tells the agent about reporting back. */

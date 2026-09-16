@@ -80,6 +80,35 @@ export function dingtalkSummarize(rawBody: string): string {
   }
 }
 
+export function dingtalkReplyUrl(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const url = (raw as { sessionWebhook?: unknown }).sessionWebhook;
+  return typeof url === 'string' && /^https:\/\//.test(url) ? url : undefined;
+}
+
+export async function dingtalkPostReplyUrl(url: string, text: string): Promise<void> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      msgtype: 'markdown',
+      markdown: { title: 'assistant', text },
+    }),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`dingtalk sessionWebhook HTTP ${response.status}: ${body.slice(0, 200)}`);
+  }
+  try {
+    const parsed = JSON.parse(body) as { errcode?: unknown; errmsg?: unknown };
+    if (typeof parsed.errcode === 'number' && parsed.errcode !== 0) {
+      throw new Error(`dingtalk sessionWebhook errcode=${parsed.errcode} ${String(parsed.errmsg ?? '')}`);
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('dingtalk sessionWebhook')) throw e;
+  }
+}
+
 export function assertDingtalkEnv(env: Record<string, string | undefined>): Response | void {
   const resolved = resolveDingtalkEnv(env);
   const missing = (
@@ -103,5 +132,7 @@ export const dingtalkAdapter = {
   create: createDingtalkChatAdapter,
   assertEnv: assertDingtalkEnv,
   summarize: dingtalkSummarize,
+  replyUrl: dingtalkReplyUrl,
+  postReplyUrl: dingtalkPostReplyUrl,
   placeholder: false as const,
 };

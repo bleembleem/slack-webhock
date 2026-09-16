@@ -178,6 +178,7 @@ async function respond(opts: {
   platform: string;
   userId: string;
   source: string;
+  replyUrl?: string;
 }): Promise<void> {
   const origin = requestContext.getStore()?.origin;
   if (!origin) throw new Error('missing request origin; cannot call /chat');
@@ -191,6 +192,7 @@ async function respond(opts: {
 
   const usePlaceholder = vendorAdapter(opts.platform)?.placeholder !== false;
   const target: CallbackTarget = { thread: opts.surface };
+  if (opts.replyUrl) target.replyUrl = opts.replyUrl;
   if (usePlaceholder) {
     const placeholder = await ThreadImpl.fromJSON(opts.surface).post(THINKING);
     target.message = placeholder.toJSON();
@@ -234,6 +236,7 @@ async function replyToThread(
     platform,
     userId: message.author.userId,
     source,
+    replyUrl: vendor?.replyUrl?.(message.raw),
   });
 }
 

@@ -48,6 +48,12 @@ export type VendorAdapter = {
    */
   placeholder?: boolean;
   /**
+   * One-shot reply URL from the inbound payload (e.g. DingTalk sessionWebhook).
+   * /chat-callback prefers this over OpenAPI when present.
+   */
+  replyUrl?: (raw: unknown) => string | undefined;
+  postReplyUrl?: (url: string, text: string) => Promise<void>;
+  /**
    * Discard a thread the platform opened on our behalf that we did not reply
    * in. Only called when `replySurface` moved the reply somewhere else.
    */
