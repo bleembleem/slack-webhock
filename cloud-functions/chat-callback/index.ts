@@ -25,6 +25,20 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
+function sanitizeCallbackError(detail: string): string {
+  const redacted = detail
+    .replace(/access_token=[^&\s"'\\]+/gi, 'access_token=***')
+    .replace(/corpsecret=[^&\s"'\\]+/gi, 'corpsecret=***');
+  const ip = redacted.match(/from ip:\s*([\d.]+)/i)?.[1];
+  if (/errcode=60020|not allow to access from your ip/i.test(redacted)) {
+    return (
+      `WeCom 60020: message/send blocked from ${ip ?? 'this function\'s egress IP'}. ` +
+      `Add that IP under 应用管理 → 该应用 → 企业可信IP. EdgeOne egress IPs can change.`
+    );
+  }
+  return redacted.slice(0, 300);
+}
+
 export async function onRequestPost(context: CloudFunctionContext): Promise<Response> {
   const startTime = Date.now();
   logger.log(`[chat-callback] start: ${new Date(startTime).toISOString()}`);
@@ -74,7 +88,7 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
     return jsonResponse({ status: 'ok' });
   } catch (e) {
     const detail = e instanceof Error ? e.stack || e.message : String(e);
-    logger.error(`unhandled chat-callback error: ${detail}`);
-    return jsonResponse({ status: 'error', message: detail.slice(0, 300) }, 500);
+    logger.error(`unhandled chat-callback error: ${sanitizeCallbackError(detail)}`);
+    return jsonResponse({ status: 'error', message: sanitizeCallbackError(detail) }, 500);
   }
 }

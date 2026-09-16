@@ -9,6 +9,9 @@
  *   WECOM_ENCODING_AES_KEY      43-char EncodingAESKey from the same page
  *
  * URL: https://<domain>/wecom  (GET verifies echostr; POST receives messages)
+ *
+ * Replies use message/send. WeCom 60020 means the function egress IP is not
+ * on 应用管理 → 企业可信IP. There is no sessionWebhook fallback.
  */
 
 import { createWecomAdapter, verifyWecomUrl, xmlTag } from '@edgeone/chat-adapter-wecom';
