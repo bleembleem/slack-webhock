@@ -134,6 +134,55 @@ export function feishuHandshake(
   return undefined;
 }
 
+/**
+ * Feishu retries when the first 200 is missing or not JSON. Those retries
+ * share `header.event_id` / `message.message_id` (or the same `encrypt`
+ * blob). Drop the second copy we see on this instance — Slack does the
+ * same with `event.ts`.
+ */
+const claimedEvents = new Map<string, number>();
+const CLAIM_TTL_MS = 120_000;
+
+function claimFeishuEvent(id: string): boolean {
+  const now = Date.now();
+  for (const [key, at] of claimedEvents) {
+    if (now - at > CLAIM_TTL_MS) claimedEvents.delete(key);
+  }
+  if (claimedEvents.has(id)) return false;
+  claimedEvents.set(id, now);
+  return true;
+}
+
+function feishuEventKey(rawBody: string): string | undefined {
+  try {
+    const payload = JSON.parse(rawBody) as {
+      encrypt?: unknown;
+      header?: { event_id?: unknown };
+      event?: { message?: { message_id?: unknown } };
+    };
+    if (typeof payload.encrypt === 'string' && payload.encrypt) return payload.encrypt;
+    const eventId = payload.header?.event_id;
+    if (typeof eventId === 'string' && eventId) return eventId;
+    const messageId = payload.event?.message?.message_id;
+    if (typeof messageId === 'string' && messageId) return messageId;
+  } catch {
+    /* not JSON */
+  }
+  return undefined;
+}
+
+export function feishuSkip(rawBody: string): string | undefined {
+  const key = feishuEventKey(rawBody);
+  if (key && !claimFeishuEvent(key)) {
+    return `duplicate event ${key.slice(0, 24)}`;
+  }
+  return undefined;
+}
+
+export function feishuAck(): Response {
+  return jsonResponse({ status: 'ok' });
+}
+
 export function feishuSummarize(rawBody: string): string {
   try {
     const outer = JSON.parse(rawBody) as { encrypt?: unknown; header?: { event_type?: unknown } };
@@ -168,6 +217,8 @@ export const feishuAdapter = {
   create: createFeishuChatAdapter,
   assertEnv: assertFeishuEnv,
   handshake: feishuHandshake,
+  skip: feishuSkip,
+  ack: feishuAck,
   summarize: feishuSummarize,
   placeholder: false as const,
 };

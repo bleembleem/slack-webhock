@@ -75,6 +75,11 @@ export type VendorAdapter = {
     rawBody: string,
     request: { headers: { get(name: string): string | null } },
   ) => string | undefined;
+  /**
+   * Body of the immediate 200. Default is Slack's plaintext `ok`. Feishu
+   * treats a non-JSON 200 as a failed delivery and retries the event.
+   */
+  ack?: () => Response;
   summarize?: (
     rawBody: string,
     request: { headers: { get(name: string): string | null } },

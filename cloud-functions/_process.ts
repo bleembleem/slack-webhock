@@ -170,6 +170,7 @@ export type RunChatWebhookOptions = {
   summarize?: VendorAdapter['summarize'];
   respond?: VendorAdapter['respond'];
   prepare?: VendorAdapter['prepare'];
+  ack?: VendorAdapter['ack'];
 };
 
 export async function runChatWebhook(
@@ -207,7 +208,7 @@ export async function runChatWebhook(
   const skip = opts.skip?.(rawBody, request);
   if (skip) {
     logger.log(`acking without processing: ${skip}`);
-    return emptyOk();
+    return opts.ack?.() ?? emptyOk();
   }
 
   const envError = opts.assertEnv(context.env);
@@ -296,7 +297,7 @@ export async function runChatWebhook(
     () => undefined,
   );
   logger.log(`[${tag}] ack elapsed=${Date.now() - startTime}ms`);
-  return emptyOk();
+  return opts.ack?.() ?? emptyOk();
 }
 
 export function createVendorWebhook(adapter: VendorAdapter) {
@@ -309,6 +310,7 @@ export function createVendorWebhook(adapter: VendorAdapter) {
       summarize: adapter.summarize,
       respond: adapter.respond,
       prepare: adapter.prepare,
+      ack: adapter.ack,
     });
   };
 }
