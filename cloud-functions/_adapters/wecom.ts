@@ -100,6 +100,62 @@ export function wecomHandshakeGet(
   return new Response(plain, { status: 200, headers: { 'Content-Type': 'text/plain' } });
 }
 
+/** WeCom text content is capped at 2048 bytes. */
+function truncateUtf8(value: string, maxBytes: number): string {
+  const buf = Buffer.from(value, 'utf8');
+  if (buf.length <= maxBytes) return value;
+  return buf.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD+$/g, '');
+}
+
+function wecomPlainText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```\w*\n?/g, '').replace(/```/g, ''))
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .trim();
+}
+
+export async function wecomDeliver(
+  env: Record<string, string | undefined>,
+  threadId: string,
+  text: string,
+): Promise<void> {
+  const resolved = resolveWecomEnv(env);
+  if (!resolved.WECOM_CORP_ID || !resolved.WECOM_AGENT_ID || !resolved.WECOM_APP_SECRET) {
+    throw new Error('wecom deliver is missing corpId, agentId, or appSecret');
+  }
+  const userId = threadId.startsWith('wecom:') ? threadId.slice('wecom:'.length) : threadId;
+  const content = truncateUtf8(wecomPlainText(text) || text, 2048);
+  const tokenRes = await fetch(
+    `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${encodeURIComponent(resolved.WECOM_CORP_ID)}` +
+      `&corpsecret=${encodeURIComponent(resolved.WECOM_APP_SECRET)}`,
+  );
+  const tokenBody = (await tokenRes.json()) as { access_token?: string; errcode?: number; errmsg?: string };
+  if (!tokenBody.access_token) {
+    throw new Error(`wecom gettoken failed errcode=${tokenBody.errcode ?? ''} ${tokenBody.errmsg ?? ''}`);
+  }
+  const sendRes = await fetch(
+    `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(tokenBody.access_token)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        touser: userId,
+        msgtype: 'text',
+        agentid: Number(resolved.WECOM_AGENT_ID) || resolved.WECOM_AGENT_ID,
+        text: { content },
+      }),
+    },
+  );
+  const sendBody = (await sendRes.json()) as { errcode?: number; errmsg?: string };
+  if (typeof sendBody.errcode === 'number' && sendBody.errcode !== 0) {
+    throw new Error(`wecom message/send errcode=${sendBody.errcode} ${sendBody.errmsg ?? ''}`);
+  }
+  logger.log(`delivered text to ${userId} chars=${content.length}`);
+}
+
 export function wecomSummarize(rawBody: string): string {
   const encrypt = xmlTag(rawBody, 'Encrypt');
   return encrypt
@@ -133,5 +189,6 @@ export const wecomAdapter = {
   assertEnv: assertWecomEnv,
   handshakeGet: wecomHandshakeGet,
   summarize: wecomSummarize,
+  deliver: wecomDeliver,
   placeholder: false as const,
 };

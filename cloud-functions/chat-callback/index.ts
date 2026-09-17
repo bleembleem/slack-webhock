@@ -57,11 +57,17 @@ export async function onRequestPost(context: CloudFunctionContext): Promise<Resp
     const { target, text } = (await context.request!.json()) as CallbackRequest;
     logger.log(
       `thread=${target.thread.id} message=${target.message?.id ?? 'none'}` +
-        ` replyUrl=${target.replyUrl ? 'yes' : 'no'} len=${text.length}`,
+        ` replyUrl=${target.replyUrl ? 'yes' : 'no'} len=${text.length}` +
+        ` preview="${text.slice(0, 80).replace(/\s+/g, ' ')}"`,
     );
 
     const platform = target.thread.id.split(':')[0] ?? '';
     const vendor = vendorAdapter(platform);
+    if (vendor?.deliver) {
+      await vendor.deliver(context.env, target.thread.id, text);
+      logger.log(`[chat-callback] done via deliver: total ${Date.now() - startTime}ms`);
+      return jsonResponse({ status: 'ok' });
+    }
     if (target.replyUrl && vendor?.postReplyUrl) {
       try {
         await vendor.postReplyUrl(target.replyUrl, text);
