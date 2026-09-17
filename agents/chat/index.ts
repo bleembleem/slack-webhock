@@ -47,14 +47,31 @@ function parseCallback(value: unknown): AgentCallback | undefined {
  * The runtime still kills an invocation at 600s. Past that the callback never
  * fires and the placeholder is left saying "Thinking…".
  */
+function isDittoReply(text: string): boolean {
+  const normalized = text.replace(/[。.!！\s]/g, '');
+  return /^(同上|同上所述|同上回复|ditto|sameasabove)$/i.test(normalized);
+}
+
 async function runWithCallback(
   agent: Agent,
   message: string,
   session: Session | undefined,
   callback: AgentCallback,
 ): Promise<Response> {
-  const result = await run(agent, message, { session });
-  const text = String(result.finalOutput ?? '').trim();
+  let result = await run(agent, message, { session });
+  let text = String(result.finalOutput ?? '').trim();
+  if (isDittoReply(text)) {
+    logger.log(`[callback] rejected ditto reply, rerunning`);
+    result = await run(
+      agent,
+      `${message}\n\n请给出完整回答，不要回复「同上」。`,
+      { session },
+    );
+    text = String(result.finalOutput ?? '').trim();
+    if (isDittoReply(text)) {
+      text = '我这边没有可用的上文可引用，请再问一次具体问题。';
+    }
+  }
   logger.log(`[callback] POST ${callback.url} len=${text.length}`);
 
   const res = await fetch(callback.url, {
@@ -162,7 +179,9 @@ export async function onRequest(context: AgentContext) {
       'directly. Do not summarize the same weather/data twice in different formats ' +
       '(prose + table + raw tool string). Pick one presentation and stick with it.\n' +
       '- Keep the final answer compact: a short title, the requested facts, and at most one ' +
-      'trailing sentence of context. No "Need anything else?" type filler.',
+      'trailing sentence of context. No "Need anything else?" type filler.\n' +
+      '- NEVER reply with 同上, 同上。, ditto, or "same as above". IM clients show each ' +
+      'message alone, so every answer must be a complete standalone reply.',
     tools: createTools(),
     model: model,
   });
